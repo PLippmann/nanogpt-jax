@@ -10,7 +10,7 @@ import tiktoken
 # hyperparameters
 batch_size = 32
 block_size = 256
-max_iters = 5000
+max_iters = 2000
 eval_interval = 500
 learning_rate = 3e-4
 eval_iters = 200
@@ -37,6 +37,7 @@ assert enc.decode(enc.encode("hello world")) == "hello world"
 data = np.array(enc.encode(text))
 train_data = jnp.array(data[:int(0.9 * len(data))])
 val_data = jnp.array(data[int(0.9 * len(data)):])
+print(data.shape, train_data.shape, val_data.shape, data[:10])
 
 class TransformerParams(NamedTuple):
     token_embedding: jnp.ndarray
@@ -166,7 +167,7 @@ def train_step(params, opt_state, batch, key):
     return params, opt_state, loss
 
 # Initialize model
-vocab_size = int(max(train_data)) + 1
+vocab_size = 50304  # GPT-2 vocabulary size
 params = init_params(init_rng, vocab_size)
 
 # Initialize optimizer
@@ -186,3 +187,46 @@ for iter in range(max_iters):
             batch = get_batch(val_data, split_key)
             losses.append(loss_fn(params, batch, split_key))
         print(f"step {iter}: train loss {loss:.4f}, val loss {jnp.mean(jnp.array(losses)):.4f}")
+
+@jit
+def generate_step(params, x, key):
+    """Single forward step with temperature-adjusted sampling."""
+    logits = forward(params, x[None, :], key, training=False)[0]
+    next_token_logits = logits[-1, :]  # Get logits for the last position
+    # Apply temperature sampling
+    temperature = 0.8  # Adjust this value to control randomness (lower = more focused)
+    next_token_logits = next_token_logits / temperature
+    # Sample from the distribution
+    next_token = jax.random.categorical(key, next_token_logits)
+    return next_token
+
+def generate_text(params, prompt, max_new_tokens=100, temperature=0.8):
+    """Generate text from a prompt."""
+    # Encode the prompt
+    input_ids = jnp.array(enc.encode(prompt))
+    
+    # Initialize generation
+    generated = list(input_ids)
+    key = jax.random.PRNGKey(0)
+    
+    # Generate tokens
+    for _ in range(max_new_tokens):
+        # Get the window of tokens that fits our model's context size
+        x = jnp.array(generated[-block_size:] if len(generated) > block_size else generated)
+        
+        # Get next token
+        key, subkey = jax.random.split(key)
+        next_token = generate_step(params, x, subkey)
+        
+        # Append to generated sequence
+        generated.append(next_token)
+    
+    # Decode the generated tokens
+    return enc.decode(generated)
+
+# Example usage:
+prompt = "Behold,"
+print("\nGenerating text from prompt:", prompt)
+print("-" * 40)
+generated_text = generate_text(params, prompt, max_new_tokens=200)
+print(generated_text)
