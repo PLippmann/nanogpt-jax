@@ -1,3 +1,4 @@
+#pip install jax optax tiktoken
 import jax
 import jax.numpy as jnp
 import jax.lax as lax
@@ -7,6 +8,39 @@ import numpy as np
 from typing import NamedTuple, Optional
 import tiktoken
 
+
+class TransformerConfig(NamedTuple):
+    """Configuration for Transformer model.
+       
+       vocab_size: Size of the vocabulary
+       block_size: Maximum sequence length
+       n_embd: Embedding dimension
+       n_head: Number of attention heads
+       n_layer: Number of transformer layers
+       dropout: Dropout probability
+       batch_size: Training batch size
+       learning_rate: Learning rate for optimization
+       max_iters: Maximum number of training iterations
+       eval_interval: Number of steps between evaluations
+       eval_iters: Number of evaluation iterations
+       init_scale: Scale for weight initialization
+    """
+    vocab_size: int = 50304  # GPT-2 vocabulary size
+    block_size: int = 256
+    n_embd: int = 384
+    n_head: int = 6
+    n_layer: int = 6
+    dropout: float = 0.2
+    batch_size: int = 32
+    learning_rate: float = 3e-4
+    max_iters: int = 2000
+    eval_interval: int = 500
+    eval_iters: int = 200
+    init_scale: float = 0.02
+
+    def __post_init__(self):
+        assert self.n_embd % self.n_head == 0, "n_embd must be divisible by n_head"
+        assert self.dropout >= 0 and self.dropout <= 1, "dropout must be between 0 and 1 inclusive"
 
 class TransformerParams(NamedTuple):
     token_embedding: jnp.ndarray
@@ -21,8 +55,8 @@ class TransformerParams(NamedTuple):
 @jit
 def get_sequence(data, start_idx):
     """Extract a sequence of tokens and the corresponding targets from the data."""
-    x_seq = lax.dynamic_slice(data, (start_idx,), (block_size,))
-    y_seq = lax.dynamic_slice(data, (start_idx + 1,), (block_size,))
+    x_seq = lax.dynamic_slice(data, (start_idx,), (config.block_size,))
+    y_seq = lax.dynamic_slice(data, (start_idx + 1,), (config.block_size,))
     
     return x_seq, y_seq
 
@@ -30,33 +64,33 @@ def get_sequence(data, start_idx):
 def get_batch(data, rng_key):
     """Generate a batch of data for training or validation."""
     data_size = data.shape[0]
-    max_start_idx = data_size - block_size
-    ix = jax.random.randint(rng_key, (batch_size,), 0, max_start_idx)
+    max_start_idx = data_size - config.block_size
+    ix = jax.random.randint(rng_key, (config.batch_size,), 0, max_start_idx)
     x, y = jax.vmap(lambda idx: get_sequence(data, idx))(ix)
     
     return x, y
 
-def init_params(rng, vocab_size):
+def init_params(rng):
     """Initialize model parameters."""
     rngs = jax.random.split(rng, 8)
     
-    token_embedding = jax.random.normal(rngs[0], (vocab_size, n_embd)) * 0.02
-    position_embedding = jax.random.normal(rngs[1], (block_size, n_embd)) * 0.02
+    token_embedding = jax.random.normal(rngs[0], (config.vocab_size, config.n_embd)) * 0.02
+    position_embedding = jax.random.normal(rngs[1], (config.block_size, config.n_embd)) * 0.02
     
     layer_norms, attention_weights, attention_projections, mlp_weights = [], [], [], []
-    for _ in range(n_layer):
+    for _ in range(config.n_layer):
         # Initialize layer norm parameters with scale and bias
-        layer_norms.append(jnp.ones((n_embd,)))
-        attention_weights.append(jax.random.normal(rngs[2], (n_embd, 3 * n_embd)) * 0.02)
-        attention_projections.append(jax.random.normal(rngs[3], (n_embd, n_embd)) * 0.02)
+        layer_norms.append(jnp.ones((config.n_embd,)))
+        attention_weights.append(jax.random.normal(rngs[2], (config.n_embd, 3 * config.n_embd)) * 0.02)
+        attention_projections.append(jax.random.normal(rngs[3], (config.n_embd, config.n_embd)) * 0.02)
         mlp_weights.append({
-            'c_fc': jax.random.normal(rngs[4], (n_embd, 4 * n_embd)) * 0.02,
-            'c_proj': jax.random.normal(rngs[5], (4 * n_embd, n_embd)) * 0.02
+            'c_fc': jax.random.normal(rngs[4], (config.n_embd, 4 * config.n_embd)) * 0.02,
+            'c_proj': jax.random.normal(rngs[5], (4 * config.n_embd, config.n_embd)) * 0.02
         })
 
     # Initialize final layer norm with scale and bias
-    final_layer_norm = jnp.ones((n_embd,))
-    lm_head = jax.random.normal(rngs[6], (n_embd, vocab_size)) * 0.02
+    final_layer_norm = jnp.ones((config.n_embd,))
+    lm_head = jax.random.normal(rngs[6], (config.n_embd, config.vocab_size)) * 0.02
     
     return TransformerParams(
         token_embedding=token_embedding,
@@ -93,24 +127,24 @@ def attention(q, k, v, mask=None):
 def forward(params, x, key, training=False):
     """Forward pass through the transformer model."""
     b, t = x.shape
-    head_size = n_embd // n_head
+    head_size = config.n_embd // config.n_head
     token_emb = params.token_embedding[x]
     pos = jnp.arange(t)
     pos_emb = params.position_embedding[pos]
     x = token_emb + pos_emb
     mask = jnp.tril(jnp.ones((t, t)))
     
-    for i in range(n_layer):
+    for i in range(config.n_layer):
         # Layer normalization with scale and bias
         ln1 = layer_norm(x, params.layer_norms[i])
         qkv = jnp.dot(ln1, params.attention_weights[i])
         q, k, v = jnp.split(qkv, 3, axis=-1)
-        q = q.reshape(b, t, n_head, head_size).transpose(0, 2, 1, 3)
-        k = k.reshape(b, t, n_head, head_size).transpose(0, 2, 1, 3)
-        v = v.reshape(b, t, n_head, head_size).transpose(0, 2, 1, 3)
+        q = q.reshape(b, t, config.n_head, head_size).transpose(0, 2, 1, 3)
+        k = k.reshape(b, t, config.n_head, head_size).transpose(0, 2, 1, 3)
+        v = v.reshape(b, t, config.n_head, head_size).transpose(0, 2, 1, 3)
         
         att = attention(q, k, v, mask)
-        att = att.transpose(0, 2, 1, 3).reshape(b, t, n_embd)
+        att = att.transpose(0, 2, 1, 3).reshape(b, t, config.n_embd)
         att = jnp.dot(att, params.attention_projections[i])
         x = x + att
         
@@ -122,7 +156,7 @@ def forward(params, x, key, training=False):
         
         if training:
             dropout_key, key = jax.random.split(key)
-            x = jnp.where(jax.random.uniform(dropout_key, x.shape) > dropout, x, 0)
+            x = jnp.where(jax.random.uniform(dropout_key, x.shape) > config.dropout, x, 0)
     
     # Final layer normalization
     x = layer_norm(x, params.final_layer_norm)
@@ -176,7 +210,7 @@ def generate_text(params, prompt, max_new_tokens=100, temperature=0.8):
     # Generate tokens
     for _ in range(max_new_tokens):
         # Get the window of tokens that fits our model's context size
-        x = jnp.array(generated[-block_size:] if len(generated) > block_size else generated)
+        x = jnp.array(generated[-config.block_size:] if len(generated) > config.block_size else generated)
         
         # Get next token
         key, subkey = jax.random.split(key)
@@ -189,17 +223,8 @@ def generate_text(params, prompt, max_new_tokens=100, temperature=0.8):
     return enc.decode(generated)
 
 if __name__ == "__main__":
-    # hyperparameters
-    batch_size = 32
-    block_size = 256
-    max_iters = 2000
-    eval_interval = 500
-    learning_rate = 3e-4
-    eval_iters = 200
-    n_embd = 384
-    n_head = 6
-    n_layer = 6
-    dropout = 0.2
+    # Initialize configuration
+    config = TransformerConfig()
 
     # RNG setup
     rng = jax.random.PRNGKey(0)
@@ -221,20 +246,19 @@ if __name__ == "__main__":
     print(data.shape, train_data.shape, val_data.shape, data[:10])
     
     # Initialize model and optimizer
-    vocab_size = 50304  # GPT-2 vocabulary size
-    params = init_params(init_rng, vocab_size)
-    optimizer = optax.adam(learning_rate)
+    params = init_params(init_rng)
+    optimizer = optax.adam(config.learning_rate)
     opt_state = optimizer.init(params)
 
     # Main training loop
-    for iter in range(max_iters):
+    for iter in range(config.max_iters):
         rng, split_key = jax.random.split(rng)
         batch = get_batch(train_data, split_key)
         params, opt_state, loss = train_step(params, opt_state, batch, split_key)
         
-        if iter % eval_interval == 0:
+        if iter % config.eval_interval == 0:
             losses = []
-            for _ in range(eval_iters):
+            for _ in range(config.eval_iters):
                 rng, split_key = jax.random.split(rng)
                 batch = get_batch(val_data, split_key)
                 losses.append(loss_fn(params, batch, split_key))
