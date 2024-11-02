@@ -21,20 +21,16 @@ pip install jax tiktoken optax
 ```
 
 ## Run
-For nanogpt:
+#### For nanogpt:
 ```
 TBD
 ```
 
-For the single file GPT:
-```
-Copy and paste into Colab, connect to TPU, and you're good to go.
-```
-<a target="_blank" href="https://colab.research.google.com/github/https://colab.research.google.com/drive/1_o2cDNtgRI_AOUrEIhAzkvlzPkSx7NK7">
+#### For the single file GPT: <a target="_blank" href="https://colab.research.google.com/github/PLippmann/nanogpt-jax/blob/main/simple/simple.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a>
-
-For picoGPT:
+ 
+#### For picoGPT:
 ```
 python ./short/pico.py
 ```
