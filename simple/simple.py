@@ -4,8 +4,7 @@ import jax.numpy as jnp
 import jax.lax as lax
 from jax import random, grad, jit, vmap
 import optax
-import numpy as np
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 import tiktoken
 
 
@@ -231,7 +230,7 @@ if __name__ == "__main__":
     rng, init_rng = jax.random.split(rng)
 
     # Download data (wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt)
-    with open('input.txt', 'r', encoding='utf-8') as f:
+    with open('../data/tinysp/input.txt', 'r', encoding='utf-8') as f:
         text = f.read()
         print(text[:20])
 
@@ -240,11 +239,11 @@ if __name__ == "__main__":
     assert enc.decode(enc.encode("hello world")) == "hello world"
 
     # Train and test splits
-    data = np.array(enc.encode(text))
+    data = jnp.array(enc.encode(text))
     train_data = jnp.array(data[:int(0.9 * len(data))])
     val_data = jnp.array(data[int(0.9 * len(data)):])
     print(data.shape, train_data.shape, val_data.shape, data[:10])
-    
+
     # Initialize model and optimizer
     params = init_params(init_rng)
     optimizer = optax.adam(config.learning_rate)
@@ -255,7 +254,7 @@ if __name__ == "__main__":
         rng, split_key = jax.random.split(rng)
         batch = get_batch(train_data, split_key)
         params, opt_state, loss = train_step(params, opt_state, batch, split_key)
-        
+
         if iter % config.eval_interval == 0:
             losses = []
             for _ in range(config.eval_iters):
