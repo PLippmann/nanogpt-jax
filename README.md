@@ -3,8 +3,8 @@ Implementations of [NanoGPT](https://github.com/karpathy/nanoGPT), [picoGPT](htt
 
 This repo contains three things:
 1. A performant implementation of GPT-2 in Jax that mostly sticks to Kaparthy's layout. (```./nanogpt```)
-2. A simple GPT implementation in a single file of ~200 lines using Jax that you can run in Colab. Slow. (```./simple/simple.py```)
-3. An implementation of picoGPT in Jax in just xx lines. Very slow. (```./short/pico.py```)
+2. A simple GPT implementation in a single file of ~270 lines using Jax that you can run in Colab. Slow. (```./simple/simple.py```)
+3. An implementation of picoGPT in just jnp in just ~150 lines. Very slow. (```./short/pico.py```)
 
 ## Install
 Create venv
