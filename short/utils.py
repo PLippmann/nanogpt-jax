@@ -80,3 +80,21 @@ def load_encoder_hparams_and_params(model_size, models_dir):
     params = load_gpt2_params_from_tf_ckpt(tf_ckpt_path, hparams)
 
     return encoder, hparams, params
+
+# Load and preprocess data for training
+def load_and_preprocess_data(file_path, encoder, max_length=1024, stride=512):
+    # Read the text file
+    with open(file_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    
+    # Encode the entire text
+    tokens = encoder.encode(text)
+    
+    # Create training sequences with sliding window
+    sequences = []
+    for i in range(0, len(tokens) - max_length + 1, stride):
+        sequence = tokens[i:i + max_length]
+        if len(sequence) == max_length:
+            sequences.append(sequence)
+    
+    return sequences
