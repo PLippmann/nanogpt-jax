@@ -114,7 +114,7 @@ class GPT2(nn.Module):
         which saves memory (since un-jitted model may not fit in memory)
         """
         tokens = jnp.zeros((2, self.config.block_size), dtype=jnp.uint16)
-        params = jax.jit(super().init, static_argnums=(2,))(rng, tokens, True)
+        params = jax.jit(super().init, static_argnums=(2,))(rng, tokens, None)
         return params
 
     @nn.compact
@@ -147,7 +147,9 @@ class GPT2(nn.Module):
             #loss = optax.softmax_cross_entropy_with_integer_labels(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)).mean()
         else:
             pass
-            
+            #logits = wte.attend(x)
+            #loss = None
+        
         logits = wte.attend(x)
         loss = None
 

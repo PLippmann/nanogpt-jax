@@ -1,3 +1,4 @@
+import jax
 import numpy as np
 
 from train_gpt2 import GPT2Config, GPT2
@@ -22,3 +23,9 @@ logits, _ = model.apply({'params': params}, inputs, rngs={'dropout': rng})  # Pa
 
 assert logits.shape == (batch_size, seq_length, vocab_size), f"Expected logits shape (B, T, V), got {logits.shape}"
 print("Smoke test passed. Output shape is correct.")
+
+# Print token and position embdings
+token_embeddings = params['wte']['embedding']
+position_embeddings = params['wpe']['embedding']
+print("Token Embeddings Sample:", token_embeddings[:5])
+print("Position Embeddings Sample:", position_embeddings[:5])
