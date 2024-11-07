@@ -150,22 +150,22 @@ class GPT2(nn.Module):
     
     def generate(self, inputs, max_new_tokens=1024, temperature=1.0, top_k=None):
         """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Take a input indices (shape (B,T)) and complete the sequence max_new_tokens times, 
+        feeding the predictions back into the model each time.
         """
         def top_k_logits(logits, k):
-            if k == 0 or k is None:
-                return logits
-            else:
-                values, _ = jax.lax.top_k(logits, k)
-                min_values = jnp.expand_dims(values[:, -1], axis=-1)
-                return jnp.where(logits < min_values, jnp.ones_like(logits) * -1e9, logits)
+            values, _ = jax.lax.top_k(logits, k)
+            min_values = jnp.expand_dims(values[:, -1], axis=-1)
+            return jnp.where(logits < min_values, jnp.ones_like(logits) * -1e9, logits)
             
         for _ in range(max_new_tokens):
             logits, _ = self(inputs)
             logits = logits[:, -1, :] / temperature
             if top_k is not None:
                 logits = top_k_logits(logits, top_k)
+            
+            # TODO no softmax?
+            # jax.random.categorical expects log probabilities, while torch.multinomial works with actual probabilities
             new_tokens = jax.random.categorical(jax.random.PRNGKey(0), logits, 1)
             inputs = jnp.concatenate([inputs, new_tokens[:, None]], axis=-1)
         
