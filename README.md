@@ -14,7 +14,7 @@ source myenv/bin/activate
 ```
 Install dependencies
 ```
-pip install jax tiktoken optax
+pip install jax flax optax tiktoken tensorflow datasets transformers tqdm wandb
 ```
 
 ## Run
