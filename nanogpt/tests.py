@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 from model import GPT2Config, GPT2, SelfAttentionFlax, SelfAttention
 
+
 # Create a sample input
 batch_size = 2
 seq_length = 16
@@ -111,9 +112,24 @@ def test_parameter_count():
                                                 seq_len=config.block_size)
 
     # Compare the actual vs expected
-    print(f"Actual {actual_params}, Expected: {expected_params}")
+    print(f"Actual # of params: {actual_params}, Expected: {expected_params}")
     # Assert parameter counts match to the nearest million
     assert round(actual_params, -6) == round(expected_params, -6), "Parameter count mismatch."
+
+def test_generate_function():
+    rng = jax.random.PRNGKey(0)
+    initial_tokens = jnp.zeros((1, 1), dtype=jnp.uint16)
+    model = GPT2(config)
+    params = model.init(rng)['params']
+
+    # Generate some tokens
+    generated_tokens = model.apply({'params': params}, initial_tokens, rngs={'dropout': rng}, method=model.generate, max_new_tokens=10, temperature=1.0, top_k=10)
+    
+    # Check the generated output
+    print("Generated Tokens:", generated_tokens)
+    assert generated_tokens.shape[1] == 11, f"Expected sequence length of 11, got {generated_tokens.shape[1]}"
+    assert jnp.all(jnp.logical_and(0 <= generated_tokens, generated_tokens < config.vocab_size)), "Generated tokens are out of vocabulary range"
+    print("Generate function test passed.")
 
 # Run all tests
 test_forward_pass()
@@ -123,3 +139,4 @@ test_logits()
 test_embeddings()
 test_deterministic_mode()
 test_parameter_count()
+test_generate_function()

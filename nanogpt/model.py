@@ -140,15 +140,33 @@ class GPT2(nn.Module):
         x = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)(x)
 
         if targets is not None:
-            pass
-            #logits = nn.Dense(features=self.config.vocab_size, use_bias=self.config.use_bias)(x)
-            #loss = optax.softmax_cross_entropy_with_integer_labels(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)).mean()
+            logits = wte.attend(x)
+            loss = optax.softmax_cross_entropy_with_integer_labels(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)).mean()
         else:
-            pass
-            #logits = wte.attend(x)
-            #loss = None
-        
-        logits = wte.attend(x)
-        loss = None
+            logits = wte.attend(x)
+            loss = None
 
         return logits, loss
+    
+    def generate(self, inputs, max_new_tokens=1024, temperature=1.0, top_k=None):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        """
+        def top_k_logits(logits, k):
+            if k == 0 or k is None:
+                return logits
+            else:
+                values, _ = jax.lax.top_k(logits, k)
+                min_values = jnp.expand_dims(values[:, -1], axis=-1)
+                return jnp.where(logits < min_values, jnp.ones_like(logits) * -1e9, logits)
+            
+        for _ in range(max_new_tokens):
+            logits, _ = self(inputs)
+            logits = logits[:, -1, :] / temperature
+            if top_k is not None:
+                logits = top_k_logits(logits, top_k)
+            new_tokens = jax.random.categorical(jax.random.PRNGKey(0), logits, 1)
+            inputs = jnp.concatenate([inputs, new_tokens[:, None]], axis=-1)
+        
+        return inputs
