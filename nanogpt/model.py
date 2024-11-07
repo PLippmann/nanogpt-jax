@@ -21,12 +21,12 @@ class GPT2Config:
     dtype: Optional[str] = None
 
 class SelfAttentionFlax(nn.Module):
-    """TODO Check speed vs self written. https://flax.readthedocs.io/en/v0.5.3/_autosummary/flax.linen.MultiHeadDotProductAttention.html"""
+    """TODO Check speed vs self written."""
     config: GPT2Config
 
     @nn.compact
     def __call__(self, x, mask=None, deterministic=False):
-        """Multi-head self-attention mechanism using Flax's built-in MultiHeadDotProductAttention."""
+        """https://flax.readthedocs.io/en/v0.5.3/_autosummary/flax.linen.MultiHeadDotProductAttention.html"""
         attn_output = nn.MultiHeadDotProductAttention(
             num_heads=self.config.n_head,
             qkv_features=self.config.n_embd,
@@ -44,29 +44,28 @@ class SelfAttention(nn.Module):
     @nn.compact
     def __call__(self, x, mask=None, deterministic=False):
         """Multi-head self-attention mechanism."""
-        B, T, C = x.shape
+        B, T, C = x.shape # B: batch size, T: sequence length, C: channel size
         head_dim = C // self.config.n_head
-        query = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias)(x)
-        key = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias)(x)
-        value = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias)(x)
+        query = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(x)
+        key = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(x)
+        value = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(x)
 
         # Split heads for multi-head attention
-        query = query.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3)
-        key = key.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3)
-        value = value.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3)
+        query = query.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3) # (B, T, C) -> (B, n_head, T, head_dim)
+        key = key.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3) # (B, T, C) -> (B, n_head, T, head_dim)
+        value = value.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3) # (B, T, C) -> (B, n_head, T, head_dim)
 
         # Scaled Dot-Product Attention
-        attn_weights = jnp.einsum('bhtd,bhsd->bhts', query, key) / jnp.sqrt(head_dim)
-        if mask is not None:
-            attn_weights = jnp.where(mask, attn_weights, -1e9)
-        attn_weights = nn.softmax(attn_weights, axis=-1)
+        attn_weights = (jnp.einsum('bhtd,bhsd->bhts', query, key)) * (1.0 / jnp.sqrt(head_dim).astype(self.config.dtype))
+        attn_weights = jnp.where(mask, attn_weights, -1e9) # TODO check -1e9
+        attn_weights = nn.softmax(attn_weights, axis=-1).astype(self.config.dtype)
 
         # Weighted sum of values
         attn_output = jnp.einsum('bhts,bhsd->bhtd', attn_weights, value)
-        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(B, T, C)
+        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(B, T, C) # (B, n_head, T, head_dim) -> (B, T, C)
 
         # Output projection
-        output = nn.Dense(self.config.n_embd, dtype=self.config.dtype, use_bias=self.config.use_bias)(attn_output)
+        output = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(attn_output)
         return output
 
 class MLP(nn.Module):
@@ -127,6 +126,7 @@ class GPT2(nn.Module):
 
         # Tril attention mask to avoid attending to future tokens
         mask = jnp.tril(jnp.ones((T, T)))
+        #attn_mask = nn.make_causal_mask(inputs, dtype=bool) # TODO check which mask implementation is better
 
         # Token and positional embeddings
         wte = nn.Embed(self.config.vocab_size, self.config.n_embd, dtype=self.config.dtype, name='wte')

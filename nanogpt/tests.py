@@ -2,7 +2,7 @@ import jax
 import optax 
 import jax.numpy as jnp
 
-from train_gpt2 import GPT2Config, GPT2, SelfAttention
+from model import GPT2Config, GPT2, SelfAttention
 
 # Create a sample input
 batch_size = 2
