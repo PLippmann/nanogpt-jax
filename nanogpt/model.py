@@ -66,6 +66,7 @@ class SelfAttention(nn.Module):
 
         # Output projection
         output = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(attn_output)
+        output = nn.Dropout(self.config.dropout)(output, deterministic=deterministic)
         return output
 
 class MLP(nn.Module):
@@ -83,22 +84,20 @@ class MLP(nn.Module):
 class Block(nn.Module):
     config: GPT2Config
 
+    def setup(self):
+        self.layernorm1 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)
+        self.attention = SelfAttention(self.config)
+        self.layernorm2 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)
+        self.mlp = MLP(self.config)
+
     @nn.compact
     def __call__(self, x, mask=None, deterministic=False):
         """Compute the forward pass of a single transformer block. Layer norm -> self attention -> layer norm -> mlp."""
-        # Layer normalization
-        x = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)(x)
+        # Layer normalization and attention
+        x = x + self.attention(self.layernorm1(x), mask, deterministic=deterministic) # With residual
 
-        # Self attention
-        x = SelfAttention(self.config)(x, mask, deterministic=deterministic)
-
-        # Add and normalize
-        x += x
-        x = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)(x)
-
-        # MLP and add
-        x = MLP(self.config)(x, deterministic=deterministic)
-        x += x
+        # Layer normalization and MLP
+        x = x + self.mlp(self.layernorm2(x), deterministic=deterministic) # With residual
 
         return x
 
