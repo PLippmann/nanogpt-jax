@@ -9,7 +9,7 @@ from model import GPT2Config, GPT2, SelfAttentionFlax, SelfAttention
 batch_size = 2
 seq_length = 16
 vocab_size = 50304
-config = GPT2Config(block_size=1024, vocab_size=vocab_size, n_embd=768, n_layer=12, n_head=12, dropout=0.1)
+config = GPT2Config(block_size=1024, vocab_size=vocab_size, n_embd=768, n_layers=12, n_heads=12, dropout=0.1)
 
 # Initialize random input tokens
 rng = jax.random.PRNGKey(0)
@@ -108,7 +108,7 @@ def test_parameter_count():
     expected_params = calculate_expected_params(vocab_size=config.vocab_size,
                                                 d_model=config.n_embd,
                                                 ff_dim=config.n_embd * 4,
-                                                n_layers=config.n_layer,
+                                                n_layers=config.n_layers,
                                                 seq_len=config.block_size)
 
     # Compare the actual vs expected
@@ -123,7 +123,7 @@ def test_generate_function():
     params = model.init(rng)['params']
 
     # Generate some tokens
-    generated_tokens = model.apply({'params': params}, initial_tokens, rngs={'dropout': rng}, method=model.generate, max_new_tokens=10, temperature=1.0, top_k=10)
+    generated_tokens = model.apply({'params': params}, initial_tokens, rng=rng, rngs={'dropout': rng}, max_new_tokens=10, method=model.generate, temperature=1.0, top_k=10)
     
     # Check the generated output
     print("Generated Tokens:", generated_tokens)

@@ -8,14 +8,14 @@ import optax
 from typing import Optional
 
 
-# Use flax.struct (instead of dataclass) to define a more Jax-compatible config
+# Use flax.struct to define a more Jax-compatible config
 @struct.dataclass
 class GPT2Config:
     block_size: int = 1024
-    vocab_size: int = 50304
+    vocab_size: int = 50257
     n_embd: int = 768
-    n_layer: int = 12
-    n_head: int = 12
+    n_layers: int = 12
+    n_heads: int = 12
     dropout: float = 0.0
     use_bias: bool = True
     dtype: Optional[str] = None
@@ -28,7 +28,7 @@ class SelfAttentionFlax(nn.Module):
     def __call__(self, x, mask=None, deterministic=False):
         """https://flax.readthedocs.io/en/v0.5.3/_autosummary/flax.linen.MultiHeadDotProductAttention.html"""
         attn_output = nn.MultiHeadDotProductAttention(
-            num_heads=self.config.n_head,
+            num_heads=self.config.n_heads,
             qkv_features=self.config.n_embd,
             out_features=self.config.n_embd,
             use_bias=self.config.use_bias,
@@ -45,29 +45,28 @@ class SelfAttention(nn.Module):
     def __call__(self, x, mask=None, deterministic=False):
         """Multi-head self-attention mechanism."""
         B, T, C = x.shape # B: batch size, T: sequence length, C: channel size
-        head_dim = C // self.config.n_head
-        query = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(x)
-        key = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(x)
-        value = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(x)
+        head_dim = C // self.config.n_heads
+        
+        # Query, key, value projections  (B, T, C) -> (B, n_heads, T, head_dim)
+        qkv = nn.Dense(3 * C, use_bias=self.config.use_bias, dtype=self.config.dtype, name='c_attn')(x)
+        qkv = qkv.reshape(B, T, 3 * self.config.n_heads, head_dim)
+        q, k, v = jnp.array_split(qkv, 3, axis=2)
+        
+        # Calculate attention matrix
+        scale = 1.0 / jnp.sqrt(head_dim).astype(self.config.dtype)
+        
+        # Attn weight shape is (batch..., num_heads, q_length, kv_length)
+        attn = jnp.einsum('...qhd,...khd->...hqk', q, k) * scale
+        attn = jnp.where(mask, attn, jnp.finfo(self.config.dtype).min)
+        attn = jax.nn.softmax(attn).astype(self.config.dtype)
+        attn = nn.Dropout(self.config.dropout)(attn, deterministic=deterministic)
 
-        # Split heads for multi-head attention
-        query = query.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3) # (B, T, C) -> (B, n_head, T, head_dim)
-        key = key.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3) # (B, T, C) -> (B, n_head, T, head_dim)
-        value = value.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3) # (B, T, C) -> (B, n_head, T, head_dim)
+        # Return weighted sum over values for each query position
+        x = jnp.einsum('...hqk,...khd->...qhd', attn, v).reshape(B, T, C)
+        x = nn.Dense(C, use_bias=self.config.use_bias, dtype=self.config.dtype, name='c_proj')(x)
 
-        # Scaled Dot-Product Attention
-        attn_weights = (jnp.einsum('bhtd,bhsd->bhts', query, key)) * (1.0 / jnp.sqrt(head_dim).astype(self.config.dtype))
-        attn_weights = jnp.where(mask, attn_weights, -1e9) # TODO check -1e9
-        attn_weights = nn.softmax(attn_weights, axis=-1).astype(self.config.dtype)
-
-        # Weighted sum of values
-        attn_output = jnp.einsum('bhts,bhsd->bhtd', attn_weights, value)
-        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(B, T, C) # (B, n_head, T, head_dim) -> (B, T, C)
-
-        # Output projection
-        output = nn.Dense(self.config.n_embd, use_bias=self.config.use_bias, dtype=self.config.dtype)(attn_output)
-        output = nn.Dropout(self.config.dropout)(output, deterministic=deterministic)
-        return output
+        x = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
+        return x
 
 class MLP(nn.Module):
     config: GPT2Config
@@ -75,9 +74,9 @@ class MLP(nn.Module):
     @nn.compact
     def __call__(self, x, deterministic=False):
         """Two-layer MLP with GELU activation."""
-        x = nn.Dense(4 * self.config.n_embd, dtype=self.config.dtype, use_bias=self.config.use_bias)(x) # Fully connected layer
+        x = nn.Dense(4 * self.config.n_embd, dtype=self.config.dtype, use_bias=self.config.use_bias, name='c_fc')(x) # Fully connected layer
         x = nn.gelu(x)
-        x = nn.Dense(self.config.n_embd, dtype=self.config.dtype, use_bias=self.config.use_bias)(x) # Projection layer
+        x = nn.Dense(self.config.n_embd, dtype=self.config.dtype, use_bias=self.config.use_bias, name='c_proj')(x) # Projection layer
         output = nn.Dropout(self.config.dropout)(x, deterministic=deterministic)
         return output
 
@@ -85,19 +84,19 @@ class Block(nn.Module):
     config: GPT2Config
 
     def setup(self):
-        self.layernorm1 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)
-        self.attention = SelfAttention(self.config)
-        self.layernorm2 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)
+        self.ln_1 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)
+        self.attn = SelfAttention(self.config)
+        self.ln_2 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)
         self.mlp = MLP(self.config)
 
     @nn.compact
     def __call__(self, x, mask=None, deterministic=False):
         """Compute the forward pass of a single transformer block. Layer norm -> self attention -> layer norm -> mlp."""
         # Layer normalization and attention
-        x = x + self.attention(self.layernorm1(x), mask, deterministic=deterministic) # With residual
+        x = x + self.attn(self.ln_1(x), mask, deterministic=deterministic) # With residual
 
         # Layer normalization and MLP
-        x = x + self.mlp(self.layernorm2(x), deterministic=deterministic) # With residual
+        x = x + self.mlp(self.ln_2(x), deterministic=deterministic) # With residual
 
         return x
 
@@ -134,10 +133,10 @@ class GPT2(nn.Module):
         # Sum embeddings and apply dropout
         x = nn.Dropout(rate=self.config.dropout)(wte(inputs) + wpe(positions), deterministic=deterministic)
 
-        for _ in range(self.config.n_layer):
-            x = Block(self.config)(x, mask, deterministic=deterministic)
+        for i in range(self.config.n_layers):
+            x = Block(self.config, name=str(i))(x, mask, deterministic=deterministic)
 
-        x = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)(x)
+        x = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias, name='ln_f')(x)
 
         if targets is not None:
             logits = wte.attend(x)
@@ -148,7 +147,7 @@ class GPT2(nn.Module):
 
         return logits, loss
     
-    def generate(self, inputs, max_new_tokens=1024, temperature=1.0, top_k=None):
+    def generate(self, inputs, rng, max_new_tokens=100, temperature=1.0, top_k=None):
         """
         Take a input indices (shape (B,T)) and complete the sequence max_new_tokens times, 
         feeding the predictions back into the model each time.
@@ -157,7 +156,7 @@ class GPT2(nn.Module):
             values, _ = jax.lax.top_k(logits, k)
             min_values = jnp.expand_dims(values[:, -1], axis=-1)
             return jnp.where(logits < min_values, jnp.ones_like(logits) * -1e9, logits)
-            
+
         for _ in range(max_new_tokens):
             logits, _ = self(inputs)
             logits = logits[:, -1, :] / temperature
@@ -166,7 +165,7 @@ class GPT2(nn.Module):
             
             # TODO no softmax?
             # jax.random.categorical expects log probabilities, while torch.multinomial works with actual probabilities
-            new_tokens = jax.random.categorical(jax.random.PRNGKey(0), logits, 1)
+            new_tokens = jax.random.categorical(rng, logits, 1)
             inputs = jnp.concatenate([inputs, new_tokens[:, None]], axis=-1)
         
         return inputs
