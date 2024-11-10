@@ -18,7 +18,7 @@ class GPT2Config:
     n_heads: int = 12
     dropout: float = 0.0
     use_bias: bool = True
-    dtype: Optional[str] = None
+    dtype: Optional[str] = jnp.float32 # Use jnp.bfloat16 for TPU
 
 class SelfAttentionFlax(nn.Module):
     """TODO Check speed vs self written."""
@@ -89,7 +89,6 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias)
         self.mlp = MLP(self.config)
 
-    @nn.compact
     def __call__(self, x, mask=None, deterministic=False):
         """Compute the forward pass of a single transformer block. Layer norm -> self attention -> layer norm -> mlp."""
         # Layer normalization and attention
@@ -99,7 +98,7 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x), deterministic=deterministic) # With residual
 
         return x
-
+    
 class GPT2(nn.Module):
     """Define a GPT2 model using Flax/linen"""
     config: GPT2Config
@@ -138,11 +137,11 @@ class GPT2(nn.Module):
 
         x = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias, name='ln_f')(x)
 
+        logits = wte.attend(x)
+
         if targets is not None:
-            logits = wte.attend(x)
             loss = optax.softmax_cross_entropy_with_integer_labels(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)).mean()
         else:
-            logits = wte.attend(x)
             loss = None
 
         return logits, loss

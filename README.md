@@ -1,23 +1,40 @@
 # nanogpt-jax
-Implementation of [NanoGPT](https://github.com/karpathy/nanoGPT). All in Jax/Flax. Currently WIP.
+Implementation of [NanoGPT](https://github.com/karpathy/nanoGPT). All in Jax/Flax. 
 
-This repo contains a performant implementation of GPT-2 in Jax that mostly sticks to Kaparthy's layout.
+Currently WIP. The goals are to:
+1. ~~Implement the model in Jax~~
+2. ~~Write tests~~
+3. ~~Load pretrained weights~~
+4. ~~Perform inference from pretrained weights~~
+5. Train the model on TPUs
+6. Make it fast with @pmap/@jit
+7. Run inference on the trained model
+8. Post training
+9. Implement RoPE, Muon optimizer, and other improvements
 
 ## Install
-Create venv
+Clone the repository
 ```
-python3 -m venv myenv
+git clone https://github.com/plippmann/nanogpt-jax && cd nanogpt-jax
 ```
-Activate venv
+Install the requirements
 ```
-source myenv/bin/activate
+pip -r requirements.txt
 ```
-Install dependencies
+Prepare the data
 ```
-pip install jax flax optax tiktoken tensorflow datasets transformers tqdm wandb
+python data/openwebtext/prepare.py
 ```
 
-## Run
+## Inference
+The simplest inference example is to generate text from a set prompt and pretrained weights. 
+```
+python inference.py
+```
+
+More to follow...
+
+## Train
 ```
 TBD
 ```
