@@ -39,4 +39,10 @@ More to follow...
 TBD
 ```
 
+## Useful Resources
+Things that have been helpful in the development of this project:
+- [NanoGPT](https://github.com/karpathy/nanoGPT/tree/master)
+- [gpt-jax](https://github.com/jenkspt/gpt-jax/tree/main)
+- [PyTorch to Jax blog](https://github.com/ROCm/rocm-blogs/tree/release/blogs/artificial-intelligence/nanoGPT-JAX)
+
 ![an image of a landscape](assets/landscape.png)
