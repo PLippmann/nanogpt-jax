@@ -6,13 +6,14 @@ from model import GPT2Config, GPT2, SelfAttentionFlax, SelfAttention
 
 
 # Create a sample input
+seed = 1337
 batch_size = 2
 seq_length = 16
 vocab_size = 50304
 config = GPT2Config(block_size=1024, vocab_size=vocab_size, n_embd=768, n_layers=12, n_heads=12, dropout=0.1)
 
 # Initialize random input tokens
-rng = jax.random.PRNGKey(0)
+rng = jax.random.PRNGKey(seed)
 inputs = jax.random.randint(rng, (batch_size, seq_length), 0, vocab_size)
 
 # Initialize the model parameters

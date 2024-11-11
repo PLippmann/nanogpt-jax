@@ -33,7 +33,6 @@ def get_pretrained_params(model_type: str) -> Tuple[GPT2Config, FrozenDict]:
     Returns config and pretrained parameters from huggingface gpt models 
     """
     assert model_type in ('gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl')
-    # only dropout can be overridden see more notes below
     print("loading weights from pretrained gpt: %s" % model_type)
 
     config = {

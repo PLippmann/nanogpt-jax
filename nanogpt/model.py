@@ -12,13 +12,13 @@ from typing import Optional
 @struct.dataclass
 class GPT2Config:
     block_size: int = 1024
-    vocab_size: int = 50257
+    vocab_size: int = 50304 # Real vocab size is 50257 but doesn't run as well
     n_embd: int = 768
     n_layers: int = 12
     n_heads: int = 12
     dropout: float = 0.0
     use_bias: bool = True
-    dtype: Optional[str] = jnp.float32 # Use jnp.bfloat16 for TPU
+    dtype: Optional[str] = jnp.bfloat16 if jax.devices()[0].device_kind == "TPU" else jnp.float16
 
 class SelfAttentionFlax(nn.Module):
     """TODO Check speed vs self written."""
@@ -52,10 +52,8 @@ class SelfAttention(nn.Module):
         qkv = qkv.reshape(B, T, 3 * self.config.n_heads, head_dim)
         q, k, v = jnp.array_split(qkv, 3, axis=2)
         
-        # Calculate attention matrix
+        # Calculate attention matrix. Attn weight shape is (batch..., num_heads, q_length, kv_length)
         scale = 1.0 / jnp.sqrt(head_dim).astype(self.config.dtype)
-        
-        # Attn weight shape is (batch..., num_heads, q_length, kv_length)
         attn = jnp.einsum('...qhd,...khd->...hqk', q, k) * scale
         attn = jnp.where(mask, attn, jnp.finfo(self.config.dtype).min)
         attn = jax.nn.softmax(attn).astype(self.config.dtype)
