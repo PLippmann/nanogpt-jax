@@ -1,10 +1,10 @@
 import jax
 import jax.numpy as jnp
+import optax
 from flax import struct
 from flax.training.train_state import TrainState
 from flax.core.frozen_dict import FrozenDict
-from typing import Tuple
-import optax
+from typing import Tuple, List
 import numpy as np
 import argparse
 from model import GPT2, GPT2Config
@@ -28,12 +28,26 @@ class TrainConfig:
     
     # Choose data to be used [openwebtext, shakespeare]
     data_set: str = 'openwebtext'
-
+    
+    # GCP storage bucket used when running on TPU
+    tpu: bool = False
+    bucket_name: str = 'nano-openwebtext'
+    
     # Data config OpenWebText or TinyShakespeare
-    data_dir: str = f'../data/{data_set}'
-    train_path: str = f'{data_dir}/val.bin' # TODO change to train.bin after testing
-    val_path: str = f'{data_dir}/val.bin'
-
+    @property
+    def data_dir(self) -> str:
+        if self.tpu:
+            return f'gs://{self.bucket_name}'
+        return f'../data/{self.data_set}'
+    
+    @property
+    def train_path(self) -> str:
+        return f'{self.data_dir}/val.bin'  # TODO change to train.bin after testing
+    
+    @property
+    def val_path(self) -> str:
+        return f'{self.data_dir}/val.bin'
+    
     # Logging config
     log_every: int = 100 # Interval for logging training loss
     eval_every: int = 500 # Interval for logging validation loss
@@ -166,8 +180,12 @@ def get_batch(key, data, batch_size, block_size):
 
 def load_data(data_path: str) -> np.ndarray:
     """Load data from binary file."""
-    data = np.memmap(data_path, dtype=np.uint16, mode='r')
-    return data
+    if data_path.startswith('gs://'):
+        import tensorflow as tf
+        data = tf.io.gfile.GFile(data_path, 'rb')
+        return np.frombuffer(data.read(), dtype=np.uint16)
+    else:
+        return np.memmap(data_path, dtype=np.uint16, mode='r')
 
 if __name__ == "__main__":
     # Model config
@@ -182,6 +200,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=train_config.epochs)
     parser.add_argument('--learning_rate', type=float, default=train_config.learning_rate)
     parser.add_argument('--weight_decay', type=float, default=train_config.weight_decay)
+    parser.add_argument('--tpu', action='store_true', help='Use TPU and load from GCS bucket')
     args = parser.parse_args()
 
     # Update config with parsed arguments
@@ -189,7 +208,8 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        tpu=args.tpu
     )
 
     # Initialize random key
