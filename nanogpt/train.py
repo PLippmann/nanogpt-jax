@@ -24,9 +24,8 @@ class TrainConfig:
     # Training hyperparameters
     learning_rate: float = 3e-4
     batch_size: int = 16 # Per device
-    epochs: int = 5
     weight_decay: float = 0.1
-    train_steps: int = 10000
+    train_steps: int = 200000
     val_steps: int = 100
     
     # Choose data to be used [openwebtext, shakespeare]
@@ -77,7 +76,6 @@ class TrainConfig:
         print(f"- Learning rate: {self.learning_rate}")
         print(f"- Global batch size: {self.global_batch_size}")
         print(f"- Per device batch size: {self.per_device_batch_size}")
-        print(f"- Epochs: {self.epochs}")
         print(f"- Weight decay: {self.weight_decay}")
         print(f"- Number of devices: {self.num_devices}")
 
@@ -106,10 +104,10 @@ def train_step(train_state, batch, dropout_rng) -> Tuple[jnp.ndarray, TrainState
     return loss, train_state
 
 @partial(jax.pmap, axis_name='batch')
-def eval_step(train_state, batch, model) -> jnp.ndarray:
+def eval_step(train_state, batch) -> jnp.ndarray:
     """Evaluation step."""
     x, y = batch
-    output = model.apply({'params': train_state.params}, x, train=False)
+    output = train_state.apply_fn({'params': train_state.params}, x)
     logits = output[0] if isinstance(output, tuple) else output
     
     # Shift targets to the right
@@ -128,7 +126,7 @@ def evaluate(key, train_state, val_ds, model, config) -> jnp.ndarray:
     for i in range(num_batches):
         key, batch_key = jax.random.split(key)
         batch = get_batch(batch_key, val_ds, config.batch_size, config.block_size)
-        loss = eval_step(train_state, batch, model)
+        loss = eval_step(train_state, batch)
         total_loss += loss
         
         if i % 10 == 0:
@@ -211,10 +209,9 @@ if __name__ == "__main__":
     # Create initial config with defaults
     train_config = TrainConfig(model_config=config)
 
-    # Parse command line arguments with defaults from config
+    # Parse command line arguments wåith defaults from config
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=train_config.batch_size)
-    parser.add_argument('--epochs', type=int, default=train_config.epochs)
     parser.add_argument('--learning_rate', type=float, default=train_config.learning_rate)
     parser.add_argument('--weight_decay', type=float, default=train_config.weight_decay)
     parser.add_argument('--tpu', action='store_true', default=train_config.tpu, help='Use TPU and load from GCS bucket')
@@ -225,7 +222,6 @@ if __name__ == "__main__":
     # Update config with parsed arguments
     train_config = train_config.replace(
         batch_size=args.batch_size,
-        epochs=args.epochs,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         tpu=args.tpu
@@ -238,7 +234,6 @@ if __name__ == "__main__":
         config={
             "learning_rate": train_config.learning_rate,
             "batch_size": train_config.batch_size,
-            "epochs": train_config.epochs,
             "weight_decay": train_config.weight_decay,
             "model_config": train_config.model_config.__dict__,
             "dataset": train_config.data_set,
@@ -281,80 +276,76 @@ if __name__ == "__main__":
     print("\nStarting training...")
     global_step = 0
     
-    for epoch in range(args.epochs):
-        # Training
-        total_loss = 0
+    # Training
+    total_loss = 0
+    
+    for step in range(train_config.train_steps):
+        if step % 100 == 0:
+            print(f"Step {step}/{train_config.train_steps}")
         
-        for step in range(train_config.train_steps):
-            if step % 100 == 0:
-                print(f"Epoch {epoch+1}/{args.epochs}, Step {step}/{train_config.train_steps}")
-            
-            # Create per-device batches
-            key, batch_key = jax.random.split(key)
-            batch_keys = jax.random.split(batch_key, train_config.num_devices)
-            batches = [
-                get_batch(k, train_data, train_config.per_device_batch_size, config.block_size)
-                for k in batch_keys
-            ]
-            # Stack for pmap
-            batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
-            
-            # Update dropout keys
-            dropout_keys = jax.random.split(dropout_key[0], train_config.num_devices)
-            dropout_key = jnp.array(dropout_keys)
-            
-            loss, state = train_step(state, batch, dropout_key)
-            loss_value = jnp.mean(loss)
-            total_loss += loss_value
-            global_step += 1
+        # Create per-device batches
+        key, batch_key = jax.random.split(key)
+        batch_keys = jax.random.split(batch_key, train_config.num_devices)
+        batches = [
+            get_batch(k, train_data, train_config.per_device_batch_size, config.block_size)
+            for k in batch_keys
+        ]
+        # Stack for pmap
+        batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
+        
+        # Update dropout keys
+        dropout_keys = jax.random.split(dropout_key[0], train_config.num_devices)
+        dropout_key = jnp.array(dropout_keys)
+        
+        loss, state = train_step(state, batch, dropout_key)
+        loss_value = jnp.mean(loss)
+        total_loss += loss_value
+        global_step += 1
 
-            # Log training metrics
-            wandb.log({
-                "train/loss": loss_value,
-                "train/learning_rate": train_config.learning_rate,
-                "train/epoch": epoch + step/train_config.train_steps,
-                "train/global_step": global_step,
-            }, step=global_step)
-
-            if step % 100 == 0:
-                print(f"Training loss: {loss_value:.4f}")
-
-        avg_train_loss = total_loss / train_config.train_steps
-        print(f"\nEpoch {epoch+1} average training loss: {avg_train_loss:.4f}")
+        # Log training metrics
         wandb.log({
-            "train/epoch_loss": avg_train_loss,
-            "epoch": epoch + 1
+            "train/loss": loss_value,
+            "train/learning_rate": train_config.learning_rate,
+            "train/step": step,
+            "train/global_step": global_step,
         }, step=global_step)
 
-        # Validation
-        val_total_loss = 0
+        if step % 100 == 0:
+            print(f"Training loss: {loss_value:.4f}")
+
+    avg_train_loss = total_loss / train_config.train_steps
+    print(f"\nAverage training loss: {avg_train_loss:.4f}")
+    wandb.log({
+        "train/final_loss": avg_train_loss,
+    }, step=global_step)
+
+    # Validation
+    val_total_loss = 0
+    
+    for step in range(train_config.val_steps):
+        key, batch_key = jax.random.split(key)
+        batch_keys = jax.random.split(batch_key, train_config.num_devices)
+        batches = [
+            get_batch(k, val_data, train_config.per_device_batch_size, config.block_size)
+            for k in batch_keys
+        ]
+        batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
         
-        for step in range(train_config.val_steps):
-            key, batch_key = jax.random.split(key)
-            batch_keys = jax.random.split(batch_key, train_config.num_devices)
-            batches = [
-                get_batch(k, val_data, train_config.per_device_batch_size, config.block_size)
-                for k in batch_keys
-            ]
-            batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
-            
-            val_loss = eval_step(state, batch, model)
-            val_loss_value = jnp.mean(val_loss)
-            val_total_loss += val_loss_value
-            
-            # Log validation metrics
-            wandb.log({
-                "val/step_loss": val_loss_value,
-                "val/step": step,
-                "val/epoch": epoch + 1
-            }, step=global_step)
-            
-        avg_val_loss = val_total_loss / train_config.val_steps
-        print(f"Epoch {epoch+1} validation loss: {avg_val_loss:.4f}")
+        val_loss = eval_step(state, batch)
+        val_loss_value = jnp.mean(val_loss)
+        val_total_loss += val_loss_value
+        
+        # Log validation metrics
         wandb.log({
-            "val/epoch_loss": avg_val_loss,
-            "epoch": epoch + 1
+            "val/step_loss": val_loss_value,
+            "val/step": step,
         }, step=global_step)
+        
+    avg_val_loss = val_total_loss / train_config.val_steps
+    print(f"Final validation loss: {avg_val_loss:.4f}")
+    wandb.log({
+        "val/final_loss": avg_val_loss,
+    }, step=global_step)
 
     print("\nTraining complete!")
     wandb.finish()
