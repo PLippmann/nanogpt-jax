@@ -5,8 +5,8 @@ from flax.training.train_state import TrainState
 from flax.core.frozen_dict import FrozenDict
 from typing import Tuple
 import optax
-from functools import partial
- 
+import numpy as np
+import argparse
 from model import GPT2, GPT2Config
 
 @struct.dataclass
@@ -14,24 +14,33 @@ class TrainConfig:
     """Training configuration."""
     # Model config
     model_config: GPT2Config
+
+    # Random seed
+    seed: int = 1337
     
     # Training hyperparameters
     learning_rate: float = 3e-4
-    batch_size: int = 32
-    block_size: int = 128
+    batch_size: int = 16 # Per device
     epochs: int = 5
     weight_decay: float = 0.1
+    train_steps: int = 10000
+    val_steps: int = 100
     
-    # Data config
-    train_path: str = '../data/shakespeare/train.bin'
-    val_path: str = '../data/shakespeare/val.bin'
-    
-    # Logging config
-    log_every: int = 100
-    eval_every: int = 500
+    # Choose data to be used [openwebtext, shakespeare]
+    data_set: str = 'openwebtext'
 
-    # Checkpoint config
+    # Data config OpenWebText or TinyShakespeare
+    data_dir: str = f'../data/{data_set}'
+    train_path: str = f'{data_dir}/val.bin' # TODO change to train.bin after testing
+    val_path: str = f'{data_dir}/val.bin'
+
+    # Logging config
+    log_every: int = 100 # Interval for logging training loss
+    eval_every: int = 500 # Interval for logging validation loss
+
+    # Checkpoint read/write config
     checkpoint: bool = False
+    output_dir: str = 'out' # TODO implement checkpointing
     
     # TPU config
     num_devices: int = jax.device_count()
@@ -40,13 +49,12 @@ class TrainConfig:
         print(f"Initialized training config:")
         print(f"- Learning rate: {self.learning_rate}")
         print(f"- Batch size: {self.batch_size} (per device: {self.batch_size//self.num_devices})")
-        print(f"- Block size: {self.block_size}")
         print(f"- Epochs: {self.epochs}")
         print(f"- Weight decay: {self.weight_decay}")
         print(f"- Number of devices: {self.num_devices}")
 
 
-# @partial(jax.jit, static_argnums=(3,))  # Comment this out temporarily
+#@partial(jax.pmap, axis_name='batch')  # Comment this out temporarily
 def train_step(train_state, batch, dropout_rng, model) -> Tuple[jnp.ndarray, TrainState]:
     """Train step for a single batch."""
     dropout_rng, new_dropout_rng = jax.random.split(dropout_rng)
@@ -64,14 +72,15 @@ def train_step(train_state, batch, dropout_rng, model) -> Tuple[jnp.ndarray, Tra
     
     # Per device loss and gradient
     loss, grads = jax.value_and_grad(loss_fn)(train_state.params)
-    # TODO Cant use while not pmamping grads = jax.lax.pmean(grads, axis_name='batch')
+    #grads = jax.lax.pmean(grads, axis_name='batch')
+    #loss = jax.lax.pmean(loss, axis_name='batch')
     
     # Update parameters
     train_state = train_state.apply_gradients(grads=grads)
     
     return loss, train_state
 
-@partial(jax.jit, static_argnums=(2,))
+#@partial(jax.jit, static_argnums=(2,))
 def eval_step(train_state, batch, model) -> jnp.ndarray:
     """Evaluation step."""
     x, y = batch
@@ -155,61 +164,70 @@ def get_batch(key, data, batch_size, block_size):
     y = jnp.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
 
+def load_data(data_path: str) -> np.ndarray:
+    """Load data from binary file."""
+    data = np.memmap(data_path, dtype=np.uint16, mode='r')
+    return data
+
 if __name__ == "__main__":
-    # Parse command line arguments
-    import argparse
+    # Model config
+    config = GPT2Config()
+    
+    # Create initial config with defaults
+    train_config = TrainConfig(model_config=config)
+
+    # Parse command line arguments with defaults from config
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--block_size', type=int, default=128)
-    parser.add_argument('--epochs', type=int, default=5) 
-    parser.add_argument('--learning_rate', type=float, default=3e-4)
-    parser.add_argument('--weight_decay', type=float, default=0.1)
+    parser.add_argument('--batch_size', type=int, default=train_config.batch_size)
+    parser.add_argument('--epochs', type=int, default=train_config.epochs)
+    parser.add_argument('--learning_rate', type=float, default=train_config.learning_rate)
+    parser.add_argument('--weight_decay', type=float, default=train_config.weight_decay)
     args = parser.parse_args()
 
+    # Update config with parsed arguments
+    train_config = train_config.replace(
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay
+    )
+
     # Initialize random key
-    key = jax.random.PRNGKey(0)
+    key = jax.random.PRNGKey(train_config.seed)
     key, init_key, dropout_key = jax.random.split(key, 3)
 
-    # Load data
-    print("Loading data...")
-    with open(TrainConfig.train_path, 'rb') as f:
-        train_data = jnp.frombuffer(f.read(), dtype=jnp.uint8)
-    with open(TrainConfig.val_path, 'rb') as f:
-        val_data = jnp.frombuffer(f.read(), dtype=jnp.uint8)
-    print(f"Train data shape: {train_data.shape}")
-    print(f"Val data shape: {val_data.shape}")
+    # Load training data
+    train_data = load_data(train_config.train_path)
+
+    # Load validation data
+    val_data = load_data(train_config.val_path)
+
+    print("Loaded data...")
+    print(f"Train data size: {len(train_data):,} tokens")
+    print(f"Val data size: {len(val_data):,} tokens")
 
     # Initialize model and training state
     print("Initializing model...")
-    config = GPT2Config()
     model = GPT2(config)
 
     # Initialize training state
-    input_shape = (args.batch_size, args.block_size)
-    train_config = TrainConfig(
-        model_config=config,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        block_size=args.block_size
-    )
+    input_shape = (args.batch_size, config.block_size)
     state = init_train_state(init_key, train_config, model, input_shape)
     print(f"Number of parameters: {count_params(state.params):,}")
 
     # Training loop
     print("\nStarting training...")
+    
     for epoch in range(args.epochs):
         # Training
         total_loss = 0
-        num_batches = len(train_data) // (args.batch_size * args.block_size)
         
-        for step in range(num_batches):
+        for step in range(train_config.train_steps):
             if step % 100 == 0:
-                print(f"Epoch {epoch+1}/{args.epochs}, Step {step}/{num_batches}")
+                print(f"Epoch {epoch+1}/{args.epochs}, Step {step}/{train_config.train_steps}")
             
-            key, batch_key = jax.random.split(key)  # Get a new key for this batch
-            batch = get_batch(batch_key, train_data, args.batch_size, args.block_size)
+            key, batch_key = jax.random.split(key)
+            batch = get_batch(batch_key, train_data, args.batch_size, config.block_size)
             dropout_key, new_dropout_key = jax.random.split(dropout_key)
             loss, state = train_step(state, batch, new_dropout_key, model)
             total_loss += loss
@@ -217,11 +235,19 @@ if __name__ == "__main__":
             if step % 100 == 0:
                 print(f"Training loss: {loss:.4f}")
 
-        avg_train_loss = total_loss / num_batches
+        avg_train_loss = total_loss / train_config.train_steps
         print(f"\nEpoch {epoch+1} average training loss: {avg_train_loss:.4f}")
 
         # Validation
-        val_loss = evaluate(key, state, val_data, model, train_config)
-        print(f"Epoch {epoch+1} validation loss: {val_loss:.4f}")
+        val_total_loss = 0
+        
+        for step in range(train_config.val_steps):
+            key, batch_key = jax.random.split(key)
+            batch = get_batch(batch_key, val_data, args.batch_size, args.block_size)
+            val_loss = eval_step(state, batch, model)
+            val_total_loss += val_loss
+            
+        avg_val_loss = val_total_loss / train_config.val_steps
+        print(f"Epoch {epoch+1} validation loss: {avg_val_loss:.4f}")
 
     print("\nTraining complete!")
