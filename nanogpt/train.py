@@ -10,6 +10,7 @@ import flax.jax_utils
 import argparse
 from model import GPT2, GPT2Config
 from functools import partial
+import wandb
 
 @struct.dataclass
 class TrainConfig:
@@ -31,7 +32,7 @@ class TrainConfig:
     # Choose data to be used [openwebtext, shakespeare]
     data_set: str = 'openwebtext'
     
-    # TPU and data source config
+    # GCP data source config
     tpu: bool = False
     bucket_name: str = 'nano-openwebtext'
     
@@ -217,6 +218,8 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, default=train_config.learning_rate)
     parser.add_argument('--weight_decay', type=float, default=train_config.weight_decay)
     parser.add_argument('--tpu', action='store_true', default=train_config.tpu, help='Use TPU and load from GCS bucket')
+    parser.add_argument('--wandb_project', type=str, default='nanogpt', help='Weights & Biases project name')
+    parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity name')
     args = parser.parse_args()
 
     # Update config with parsed arguments
@@ -226,6 +229,20 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         tpu=args.tpu
+    )
+
+    # Initialize wandb
+    wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        config={
+            "learning_rate": train_config.learning_rate,
+            "batch_size": train_config.batch_size,
+            "epochs": train_config.epochs,
+            "weight_decay": train_config.weight_decay,
+            "model_config": train_config.model_config.__dict__,
+            "dataset": train_config.data_set,
+        }
     )
 
     # Initialize random key
@@ -249,7 +266,9 @@ if __name__ == "__main__":
     # Initialize training state
     input_shape = (train_config.per_device_batch_size, config.block_size)
     state = init_train_state(init_key, train_config, model, input_shape)
-    print(f"Number of parameters: {count_params(state.params):,}")
+    num_params = count_params(state.params)
+    print(f"Number of parameters: {num_params:,}")
+    wandb.run.summary["num_parameters"] = num_params
 
     # Replicate state across devices
     state = flax.jax_utils.replicate(state)
@@ -260,6 +279,7 @@ if __name__ == "__main__":
 
     # Training loop
     print("\nStarting training...")
+    global_step = 0
     
     for epoch in range(args.epochs):
         # Training
@@ -284,13 +304,27 @@ if __name__ == "__main__":
             dropout_key = jnp.array(dropout_keys)
             
             loss, state = train_step(state, batch, dropout_key)
-            total_loss += jnp.mean(loss)
+            loss_value = jnp.mean(loss)
+            total_loss += loss_value
+            global_step += 1
+
+            # Log training metrics
+            wandb.log({
+                "train/loss": loss_value,
+                "train/learning_rate": train_config.learning_rate,
+                "train/epoch": epoch + step/train_config.train_steps,
+                "train/global_step": global_step,
+            }, step=global_step)
 
             if step % 100 == 0:
-                print(f"Training loss: {jnp.mean(loss):.4f}")
+                print(f"Training loss: {loss_value:.4f}")
 
         avg_train_loss = total_loss / train_config.train_steps
         print(f"\nEpoch {epoch+1} average training loss: {avg_train_loss:.4f}")
+        wandb.log({
+            "train/epoch_loss": avg_train_loss,
+            "epoch": epoch + 1
+        }, step=global_step)
 
         # Validation
         val_total_loss = 0
@@ -305,9 +339,22 @@ if __name__ == "__main__":
             batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
             
             val_loss = eval_step(state, batch, model)
-            val_total_loss += jnp.mean(val_loss)
+            val_loss_value = jnp.mean(val_loss)
+            val_total_loss += val_loss_value
+            
+            # Log validation metrics
+            wandb.log({
+                "val/step_loss": val_loss_value,
+                "val/step": step,
+                "val/epoch": epoch + 1
+            }, step=global_step)
             
         avg_val_loss = val_total_loss / train_config.val_steps
         print(f"Epoch {epoch+1} validation loss: {avg_val_loss:.4f}")
+        wandb.log({
+            "val/epoch_loss": avg_val_loss,
+            "epoch": epoch + 1
+        }, step=global_step)
 
     print("\nTraining complete!")
+    wandb.finish()
