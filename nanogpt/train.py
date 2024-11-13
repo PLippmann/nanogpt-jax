@@ -35,7 +35,7 @@ class TrainConfig:
     tpu: bool = False
     bucket_name: str = 'nano-openwebtext'
     
-    # Data config OpenWebText or TinyShakespeare
+    # Data config
     @property
     def data_dir(self) -> str:
         if self.tpu:
@@ -44,7 +44,7 @@ class TrainConfig:
     
     @property
     def train_path(self) -> str:
-        return f'{self.data_dir}/val.bin'  # TODO change to train.bin after testing
+        return f'{self.data_dir}/val.bin' # TODO change to train.bin after testing
     
     @property
     def val_path(self) -> str:
@@ -91,14 +91,15 @@ def train_step(train_state, batch, dropout_rng) -> Tuple[jnp.ndarray, TrainState
         output = train_state.apply_fn({'params': params}, X, rngs={'dropout': dropout_rng})
         logits = output[0] if isinstance(output, tuple) else output
         
+        # Shift targets to the right
         logits = logits[:, :-1, :]
         Y = Y[:, 1:]
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, Y)
         return jnp.mean(loss)
     
     loss, grads = jax.value_and_grad(loss_fn)(train_state.params)
-    grads = jax.lax.pmean(grads, axis_name='batch')
-    loss = jax.lax.pmean(loss, axis_name='batch')
+    grads = jax.lax.pmean(grads, axis_name='batch') # Average gradients across devices
+    loss = jax.lax.pmean(loss, axis_name='batch') # Average loss across devices
     
     train_state = train_state.apply_gradients(grads=grads)
     return loss, train_state
@@ -110,6 +111,7 @@ def eval_step(train_state, batch, model) -> jnp.ndarray:
     output = model.apply({'params': train_state.params}, x, train=False)
     logits = output[0] if isinstance(output, tuple) else output
     
+    # Shift targets to the right
     logits = logits[:, :-1, :]
     targets = y[:, 1:]
     
@@ -154,22 +156,19 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
     print("\nInitializing training state...")
     
     if config.checkpoint:
-        pass
+        pass # TODO implement checkpointing
     else:
-        # Create dummy input
-        #dummy_input = jnp.ones(input_shape, dtype=jnp.int32)
-        
-        # Initialize parameters
+        # Initialize params
         model = GPT2(config.model_config)
         params = model.init(key)
         params = params['params']
 
     # Create optimizer
-    #decay_mask = param_decay(params)
+    #decay_mask = param_decay(params) TODO implement weight decay
     tx = optax.adamw(
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
-        #mask=decay_mask
+        #mask=decay_mask TODO implement weight decay
     )
     
     return TrainState.create(
@@ -180,14 +179,14 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
 
 def get_batch(key, data, batch_size, block_size):
     """Get a random batch of data."""
-    ix = jax.random.randint(key, (batch_size,), 0, len(data) - block_size)
+    ix = jax.random.randint(key, (batch_size,), 0, len(data) - block_size, dtype=jnp.int64) # int64 to avoid overflow
     x = jnp.stack([data[i:i+block_size] for i in ix])
     y = jnp.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
 
 def load_data(data_path: str) -> np.ndarray:
     """Load data from binary file."""
-    if data_path.startswith('gs://'):
+    if data_path.startswith('gs://'): # GCP storage bucket
         import tensorflow as tf
         data = tf.io.gfile.GFile(data_path, 'rb')
         return np.frombuffer(data.read(), dtype=np.uint16)
