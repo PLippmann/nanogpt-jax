@@ -44,7 +44,7 @@ class TrainConfig:
     
     @property
     def train_path(self) -> str:
-        return f'{self.data_dir}/val.bin' # TODO change to train.bin after testing
+        return f'{self.data_dir}/train.bin'
     
     @property
     def val_path(self) -> str:
@@ -179,7 +179,17 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
 
 def get_batch(key, data, batch_size, block_size):
     """Get a random batch of data."""
-    ix = jax.random.randint(key, (batch_size,), 0, len(data) - block_size, dtype=jnp.int64) # int64 to avoid overflow
+    data_len = len(data)
+    adjusted_max_start_idx = min(data_len - block_size, np.iinfo(np.int32).max)
+    
+    ix = jax.random.randint(
+        key, 
+        (batch_size,), 
+        0, 
+        adjusted_max_start_idx,
+        dtype=jnp.int32  # Use int32 to align with JAX's internal handling
+    )
+    
     x = jnp.stack([data[i:i+block_size] for i in ix])
     y = jnp.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
