@@ -4,10 +4,12 @@ import optax
 from flax import struct
 from flax.training.train_state import TrainState
 from flax.core.frozen_dict import FrozenDict
-from typing import Tuple, List
+from typing import Tuple
 import numpy as np
+import flax.jax_utils
 import argparse
 from model import GPT2, GPT2Config
+from functools import partial
 
 @struct.dataclass
 class TrainConfig:
@@ -29,7 +31,7 @@ class TrainConfig:
     # Choose data to be used [openwebtext, shakespeare]
     data_set: str = 'openwebtext'
     
-    # GCP storage bucket used when running on TPU
+    # TPU and data source config
     tpu: bool = False
     bucket_name: str = 'nano-openwebtext'
     
@@ -49,8 +51,8 @@ class TrainConfig:
         return f'{self.data_dir}/val.bin'
     
     # Logging config
-    log_every: int = 100 # Interval for logging training loss
-    eval_every: int = 500 # Interval for logging validation loss
+    log_every: int = 500 # Interval for logging training loss
+    eval_every: int = 50 # Interval for logging validation loss
 
     # Checkpoint read/write config
     checkpoint: bool = False
@@ -59,24 +61,34 @@ class TrainConfig:
     # TPU config
     num_devices: int = jax.device_count()
     
+    @property
+    def global_batch_size(self) -> int:
+        """Total batch size across all devices"""
+        return self.batch_size * self.num_devices
+    
+    @property
+    def per_device_batch_size(self) -> int:
+        """Batch size per device"""
+        return self.batch_size // self.num_devices
+    
     def __post_init__(self):
         print(f"Initialized training config:")
         print(f"- Learning rate: {self.learning_rate}")
-        print(f"- Batch size: {self.batch_size} (per device: {self.batch_size//self.num_devices})")
+        print(f"- Global batch size: {self.global_batch_size}")
+        print(f"- Per device batch size: {self.per_device_batch_size}")
         print(f"- Epochs: {self.epochs}")
         print(f"- Weight decay: {self.weight_decay}")
         print(f"- Number of devices: {self.num_devices}")
 
 
-#@partial(jax.pmap, axis_name='batch')  # Comment this out temporarily
-def train_step(train_state, batch, dropout_rng, model) -> Tuple[jnp.ndarray, TrainState]:
+@partial(jax.pmap, axis_name='batch', donate_argnums=(0,))  # Add donate_argnums for memory efficiency
+def train_step(train_state, batch, dropout_rng) -> Tuple[jnp.ndarray, TrainState]:
     """Train step for a single batch."""
-    dropout_rng, new_dropout_rng = jax.random.split(dropout_rng)
+    dropout_rng, new_dropout_key = jax.random.split(dropout_rng)
 
     def loss_fn(params):
         X, Y = batch
-        output = model.apply({'params': params}, X, rngs={'dropout': dropout_rng})
-        # Extract logits from model output (assuming it's the first element)
+        output = train_state.apply_fn({'params': params}, X, rngs={'dropout': dropout_rng})
         logits = output[0] if isinstance(output, tuple) else output
         
         logits = logits[:, :-1, :]
@@ -84,30 +96,25 @@ def train_step(train_state, batch, dropout_rng, model) -> Tuple[jnp.ndarray, Tra
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, Y)
         return jnp.mean(loss)
     
-    # Per device loss and gradient
     loss, grads = jax.value_and_grad(loss_fn)(train_state.params)
-    #grads = jax.lax.pmean(grads, axis_name='batch')
-    #loss = jax.lax.pmean(loss, axis_name='batch')
+    grads = jax.lax.pmean(grads, axis_name='batch')
+    loss = jax.lax.pmean(loss, axis_name='batch')
     
-    # Update parameters
     train_state = train_state.apply_gradients(grads=grads)
-    
     return loss, train_state
 
-#@partial(jax.jit, static_argnums=(2,))
+@partial(jax.pmap, axis_name='batch')
 def eval_step(train_state, batch, model) -> jnp.ndarray:
     """Evaluation step."""
     x, y = batch
     output = model.apply({'params': train_state.params}, x, train=False)
     logits = output[0] if isinstance(output, tuple) else output
     
-    # Shift logits and targets
     logits = logits[:, :-1, :]
     targets = y[:, 1:]
     
-    # Compute loss
     loss = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
-    return jnp.mean(loss)
+    return jax.lax.pmean(jnp.mean(loss), axis_name='batch')
 
 def evaluate(key, train_state, val_ds, model, config) -> jnp.ndarray:
     """Evaluate the model on the validation set."""
@@ -200,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=train_config.epochs)
     parser.add_argument('--learning_rate', type=float, default=train_config.learning_rate)
     parser.add_argument('--weight_decay', type=float, default=train_config.weight_decay)
-    parser.add_argument('--tpu', action='store_true', help='Use TPU and load from GCS bucket')
+    parser.add_argument('--tpu', action='store_true', default=train_config.tpu, help='Use TPU and load from GCS bucket')
     args = parser.parse_args()
 
     # Update config with parsed arguments
@@ -231,9 +238,16 @@ if __name__ == "__main__":
     model = GPT2(config)
 
     # Initialize training state
-    input_shape = (args.batch_size, config.block_size)
+    input_shape = (train_config.per_device_batch_size, config.block_size)
     state = init_train_state(init_key, train_config, model, input_shape)
     print(f"Number of parameters: {count_params(state.params):,}")
+
+    # Replicate state across devices
+    state = flax.jax_utils.replicate(state)
+    
+    # Create mesh-replicated random keys
+    dropout_keys = jax.random.split(dropout_key, train_config.num_devices)
+    dropout_key = jnp.array(dropout_keys)
 
     # Training loop
     print("\nStarting training...")
@@ -246,14 +260,25 @@ if __name__ == "__main__":
             if step % 100 == 0:
                 print(f"Epoch {epoch+1}/{args.epochs}, Step {step}/{train_config.train_steps}")
             
+            # Create per-device batches
             key, batch_key = jax.random.split(key)
-            batch = get_batch(batch_key, train_data, args.batch_size, config.block_size)
-            dropout_key, new_dropout_key = jax.random.split(dropout_key)
-            loss, state = train_step(state, batch, new_dropout_key, model)
-            total_loss += loss
+            batch_keys = jax.random.split(batch_key, train_config.num_devices)
+            batches = [
+                get_batch(k, train_data, train_config.per_device_batch_size, config.block_size)
+                for k in batch_keys
+            ]
+            # Stack for pmap
+            batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
+            
+            # Update dropout keys
+            dropout_keys = jax.random.split(dropout_key[0], train_config.num_devices)
+            dropout_key = jnp.array(dropout_keys)
+            
+            loss, state = train_step(state, batch, dropout_key)
+            total_loss += jnp.mean(loss)
 
             if step % 100 == 0:
-                print(f"Training loss: {loss:.4f}")
+                print(f"Training loss: {jnp.mean(loss):.4f}")
 
         avg_train_loss = total_loss / train_config.train_steps
         print(f"\nEpoch {epoch+1} average training loss: {avg_train_loss:.4f}")
@@ -263,9 +288,15 @@ if __name__ == "__main__":
         
         for step in range(train_config.val_steps):
             key, batch_key = jax.random.split(key)
-            batch = get_batch(batch_key, val_data, args.batch_size, args.block_size)
+            batch_keys = jax.random.split(batch_key, train_config.num_devices)
+            batches = [
+                get_batch(k, val_data, train_config.per_device_batch_size, config.block_size)
+                for k in batch_keys
+            ]
+            batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
+            
             val_loss = eval_step(state, batch, model)
-            val_total_loss += val_loss
+            val_total_loss += jnp.mean(val_loss)
             
         avg_val_loss = val_total_loss / train_config.val_steps
         print(f"Epoch {epoch+1} validation loss: {avg_val_loss:.4f}")
