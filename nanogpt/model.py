@@ -55,14 +55,20 @@ class SelfAttention(nn.Module):
         # Calculate attention matrix. Attn weight shape is (batch..., num_heads, q_length, kv_length)
         scale = 1.0 / jnp.sqrt(head_dim).astype(self.config.dtype)
         attn = jnp.einsum('...qhd,...khd->...hqk', q, k) * scale
-        attn = jnp.where(mask, attn, jnp.finfo(self.config.dtype).min)
+
+        # Create causal mask and combine with attention scores
+        if mask is not None:
+            # Expand mask to match attention shape [B, n_heads, T, T]
+            mask = mask[None, None, :, :]
+            # Use where with a large negative value for masked positions
+            attn = jnp.where(mask == 0, jnp.finfo(self.config.dtype).min, attn)
+
         attn = jax.nn.softmax(attn).astype(self.config.dtype)
         attn = nn.Dropout(self.config.dropout)(attn, deterministic=deterministic)
 
         # Return weighted sum over values for each query position
         x = jnp.einsum('...hqk,...khd->...qhd', attn, v).reshape(B, T, C)
         x = nn.Dense(C, use_bias=self.config.use_bias, dtype=self.config.dtype, name='c_proj')(x)
-
         x = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
         return x
 
@@ -116,18 +122,14 @@ class GPT2(nn.Module):
         B, T = inputs.shape # B: batch size, T: sequence length
         assert T <= self.config.block_size, f"Input length {T} is longer than block size {self.config.block_size}"
 
-        # Positional encoding vector of shape (1, T)
-        positions = jnp.arange(0, T)[None]
-
-        # Tril attention mask to avoid attending to future tokens
+        # Create causal mask (1s in lower triangle, 0s elsewhere)
         mask = jnp.tril(jnp.ones((T, T)))
-        #attn_mask = nn.make_causal_mask(inputs, dtype=bool) # TODO check which mask implementation is better
 
         # Token and positional embeddings
+        positions = jnp.arange(0, T)[None]
         wte = nn.Embed(self.config.vocab_size, self.config.n_embd, dtype=self.config.dtype, name='wte')
         wpe = nn.Embed(self.config.block_size, self.config.n_embd, dtype=self.config.dtype, name='wpe')
 
-        # Sum embeddings and apply dropout
         x = nn.Dropout(rate=self.config.dropout)(wte(inputs) + wpe(positions), deterministic=deterministic)
 
         for i in range(self.config.n_layers):

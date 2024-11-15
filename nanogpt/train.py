@@ -110,8 +110,8 @@ def create_learning_rate_schedule(
     
     return schedule
 
-@partial(jax.pmap, axis_name='batch', donate_argnums=(0,))  # Add donate_argnums for memory efficiency
-def train_step(train_state, batch, dropout_rng) -> Tuple[jnp.ndarray, TrainState]:
+@partial(jax.pmap, axis_name='batch', donate_argnums=(0,))
+def train_step(train_state, batch, dropout_rng, train_step_num) -> Tuple[jnp.ndarray, TrainState, jnp.ndarray]:
     """Train step for a single batch."""
     dropout_rng, new_dropout_key = jax.random.split(dropout_rng)
 
@@ -119,19 +119,19 @@ def train_step(train_state, batch, dropout_rng) -> Tuple[jnp.ndarray, TrainState
         X, Y = batch
         output = train_state.apply_fn({'params': params}, X, rngs={'dropout': dropout_rng})
         logits = output[0] if isinstance(output, tuple) else output
-        
-        # Shift targets to the right
-        logits = logits[:, :-1, :]
-        Y = Y[:, 1:]
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, Y)
         return jnp.mean(loss)
 
     loss, grads = jax.value_and_grad(loss_fn)(train_state.params)
-    grads = jax.lax.pmean(grads, axis_name='batch') # Average gradients across devices    
-    loss = jax.lax.pmean(loss, axis_name='batch') # Average loss across devices
+    grads = jax.lax.pmean(grads, axis_name='batch')
+    
+    # Calculate gradient norm before clipping
+    grad_norm = optax.global_norm(grads)
+    
+    loss = jax.lax.pmean(loss, axis_name='batch')
     
     train_state = train_state.apply_gradients(grads=grads)
-    return loss, train_state
+    return loss, train_state, grad_norm
 
 @partial(jax.pmap, axis_name='batch')
 def eval_step(train_state, batch) -> jnp.ndarray:
@@ -205,19 +205,19 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
         apply_fn=model.apply,
         params=params,
         tx=tx
-    )
+    ), lr_schedule  # Return the schedule along with the state
 
 def get_batch(key, data, batch_size, block_size):
     """Get a random batch of data."""
     data_len = len(data)
-    adjusted_max_start_idx = min(data_len - block_size, np.iinfo(np.int32).max)
+    adjusted_max_start_idx = min(data_len - block_size - 1, np.iinfo(np.int32).max)
     
     ix = jax.random.randint(
         key, 
         (batch_size,), 
         0, 
         adjusted_max_start_idx,
-        dtype=jnp.int32  # Use int32 to align with JAX's internal handling
+        dtype=jnp.int32
     )
     
     x = jnp.stack([data[i:i+block_size] for i in ix])
@@ -298,7 +298,7 @@ if __name__ == "__main__":
 
     # Initialize training state
     input_shape = (train_config.per_device_batch_size, config.block_size)
-    state = init_train_state(init_key, train_config, model, input_shape)
+    state, lr_schedule = init_train_state(init_key, train_config, model, input_shape)  # Get lr_schedule
     num_params = count_params(state.params)
     print(f"Number of parameters: {num_params:,}")
     wandb.run.summary["num_parameters"] = num_params
@@ -313,9 +313,10 @@ if __name__ == "__main__":
     # Training loop
     print("\nStarting training...")
     global_step = 0
-    
-    # Training
     total_loss = 0
+    
+    # Create replicated step counter for pmap
+    step_counter = jnp.zeros((train_config.num_devices,), dtype=jnp.int32)
     
     for step in range(train_config.train_steps):
         if step % train_config.log_every == 0:
@@ -335,30 +336,26 @@ if __name__ == "__main__":
         dropout_keys = jax.random.split(dropout_key[0], train_config.num_devices)
         dropout_key = jnp.array(dropout_keys)
         
-        loss, state = train_step(state, batch, dropout_key)
+        loss, state, grad_norm = train_step(state, batch, dropout_key, step_counter)
         loss_value = jnp.mean(loss)
+        grad_norm_value = jnp.mean(grad_norm)
+        
         total_loss += loss_value
         global_step += 1
 
         # Log training metrics
-        current_lr = create_learning_rate_schedule(
-            train_config.init_lr,
-            train_config.peak_lr,
-            train_config.warmup_steps,
-            train_config.decay_steps,
-            train_config.end_lr
-        )(step)
-        
-        wandb.log({
-            "train/loss": loss_value,
-            "train/learning_rate": current_lr,
-            "train/step": step,
-            "train/global_step": global_step,
-        }, step=global_step)
-
-        if step % 100 == 0:
-            print(f"Training loss: {loss_value:.4f}")
+        if step % train_config.log_every == 0:
+            current_lr = lr_schedule(step)  # Get learning rate for logging
+            print(f"Step {step}, Loss: {loss_value:.4f}, LR: {current_lr:.6f}, Grad norm: {grad_norm_value:.4f}")
             
+            wandb.log({
+                "train/loss": loss_value,
+                "train/learning_rate": current_lr,
+                "train/grad_norm": grad_norm_value,
+                "train/step": step,
+                "train/global_step": global_step,
+            }, step=global_step)
+
         # Validation during training
         if step % train_config.eval_every == 0:
             val_total_loss = 0
