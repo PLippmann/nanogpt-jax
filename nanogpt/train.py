@@ -4,7 +4,7 @@ import optax
 from flax import struct
 from flax.training.train_state import TrainState
 from flax.core.frozen_dict import FrozenDict
-from typing import Tuple
+from typing import Tuple, Callable
 import numpy as np
 import flax.jax_utils
 import argparse
@@ -22,11 +22,20 @@ class TrainConfig:
     seed: int = 1337
     
     # Training hyperparameters
-    learning_rate: float = 3e-4
-    batch_size: int = 16 # Per device
-    weight_decay: float = 0.1
+    learning_rate: float = 6e-4
+    batch_size: int = 32 # Per device
+    weight_decay: float = 1e-2
     train_steps: int = 200000
     val_steps: int = 100
+    grad_clip: float = 1.0
+    gradient_accumulation_steps: int = 1
+
+    # Learning rate schedule config
+    init_lr: float = 0.0
+    peak_lr: float = 2.5e-4
+    warmup_steps: int = 2000
+    decay_steps: int = 150000
+    end_lr: float = 1e-5
     
     # Choose data to be used [openwebtext, shakespeare]
     data_set: str = 'openwebtext'
@@ -73,12 +82,33 @@ class TrainConfig:
     
     def __post_init__(self):
         print(f"Initialized training config:")
-        print(f"- Learning rate: {self.learning_rate}")
         print(f"- Global batch size: {self.global_batch_size}")
         print(f"- Per device batch size: {self.per_device_batch_size}")
         print(f"- Weight decay: {self.weight_decay}")
         print(f"- Number of devices: {self.num_devices}")
 
+def create_learning_rate_schedule(
+    init_value: float,
+    peak_value: float,
+    warmup_steps: int,
+    decay_steps: int,
+    end_value: float
+) -> Callable[[int], float]:
+    """Creates a learning rate schedule with linear warmup and cosine decay."""
+    
+    def schedule(step: int) -> float:
+        # Linear warmup
+        warmup_factor = jnp.minimum(step / warmup_steps, 1.0)
+        warmup_lr = init_value + (peak_value - init_value) * warmup_factor
+        
+        # Cosine decay
+        decay_progress = jnp.maximum(0.0, (step - warmup_steps) / decay_steps)
+        decay_factor = 0.5 * (1 + jnp.cos(jnp.pi * jnp.minimum(decay_progress, 1.0)))
+        decay_lr = end_value + (peak_value - end_value) * decay_factor
+        
+        return jnp.where(step < warmup_steps, warmup_lr, decay_lr)
+    
+    return schedule
 
 @partial(jax.pmap, axis_name='batch', donate_argnums=(0,))  # Add donate_argnums for memory efficiency
 def train_step(train_state, batch, dropout_rng) -> Tuple[jnp.ndarray, TrainState]:
@@ -95,9 +125,9 @@ def train_step(train_state, batch, dropout_rng) -> Tuple[jnp.ndarray, TrainState
         Y = Y[:, 1:]
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, Y)
         return jnp.mean(loss)
-    
+
     loss, grads = jax.value_and_grad(loss_fn)(train_state.params)
-    grads = jax.lax.pmean(grads, axis_name='batch') # Average gradients across devices
+    grads = jax.lax.pmean(grads, axis_name='batch') # Average gradients across devices    
     loss = jax.lax.pmean(loss, axis_name='batch') # Average loss across devices
     
     train_state = train_state.apply_gradients(grads=grads)
@@ -138,18 +168,6 @@ def count_params(params: FrozenDict) -> int:
     """Count the number of parameters in the model."""
     return sum(x.size for x in jax.tree_util.tree_leaves(params))
 
-def param_decay(params: FrozenDict) -> FrozenDict:
-    """Compute the parameter decay mask for non-bias parameters."""
-    def _is_kernel(path, _):
-        return path[-1] == 'kernel'
-    
-    flat_mask = jax.tree.map(
-        lambda path, _: 1.0 if _is_kernel(path, None) else 0.0,
-        jax.tree_util.tree_leaves(params),
-        params
-    )
-    return FrozenDict(flat_mask)
-
 def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[int, int]) -> TrainState:
     """Initialize the training state."""
     print("\nInitializing training state...")
@@ -162,12 +180,25 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
         params = model.init(key)
         params = params['params']
 
-    # Create optimizer
-    #decay_mask = param_decay(params) TODO implement weight decay
-    tx = optax.adamw(
-        learning_rate=config.learning_rate,
-        weight_decay=config.weight_decay,
-        #mask=decay_mask TODO implement weight decay
+    # Create learning rate schedule
+    lr_schedule = create_learning_rate_schedule(
+        init_value=config.init_lr,
+        peak_value=config.peak_lr,
+        warmup_steps=config.warmup_steps,
+        decay_steps=config.decay_steps,
+        end_value=config.end_lr
+    )
+
+    # Create optimizer with weight decay and gradient clipping
+    tx = optax.chain(
+        optax.clip_by_global_norm(config.grad_clip),
+        optax.adamw(
+            learning_rate=lr_schedule, # Use learning rate schedule
+            b1=0.9,
+            b2=0.95,
+            weight_decay=config.weight_decay
+        ),
+        optax.apply_every(config.gradient_accumulation_steps),
     )
     
     return TrainState.create(
@@ -201,6 +232,11 @@ def load_data(data_path: str) -> np.ndarray:
         return np.frombuffer(data.read(), dtype=np.uint16)
     else:
         return np.memmap(data_path, dtype=np.uint16, mode='r')
+
+def check_data_validity(data):
+    """Check for NaN or infinite values in the data."""
+    if np.any(np.isnan(data)) or np.any(np.isinf(data)):
+        raise ValueError("Data contains NaN or infinite values.")
 
 if __name__ == "__main__":
     # Model config
@@ -246,9 +282,11 @@ if __name__ == "__main__":
 
     # Load training data
     train_data = load_data(train_config.train_path)
+    check_data_validity(train_data)
 
     # Load validation data
     val_data = load_data(train_config.val_path)
+    check_data_validity(val_data)
 
     print("Loaded data...")
     print(f"Train data size: {len(train_data):,} tokens")
@@ -303,9 +341,17 @@ if __name__ == "__main__":
         global_step += 1
 
         # Log training metrics
+        current_lr = create_learning_rate_schedule(
+            train_config.init_lr,
+            train_config.peak_lr,
+            train_config.warmup_steps,
+            train_config.decay_steps,
+            train_config.end_lr
+        )(step)
+        
         wandb.log({
             "train/loss": loss_value,
-            "train/learning_rate": train_config.learning_rate,
+            "train/learning_rate": current_lr,
             "train/step": step,
             "train/global_step": global_step,
         }, step=global_step)
