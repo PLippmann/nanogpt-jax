@@ -22,6 +22,7 @@ class TrainConfig:
     seed: int = 1337
     
     # Training hyperparameters
+    learning_rate: float = 6e-4
     batch_size: int = 8 # Per device
     weight_decay: float = 1e-1
     train_steps: int = 200000
@@ -52,7 +53,7 @@ class TrainConfig:
     
     @property
     def train_path(self) -> str:
-        return f'{self.data_dir}/train.bin'
+        return f'{self.data_dir}/val.bin'
     
     @property
     def val_path(self) -> str:
@@ -77,7 +78,7 @@ class TrainConfig:
     @property
     def per_device_batch_size(self) -> int:
         """Batch size per device"""
-        return self.batch_size
+        return self.batch_size // self.num_devices
     
     def __post_init__(self):
         print(f"Initialized training config:")
@@ -243,6 +244,7 @@ if __name__ == "__main__":
     # Parse command line arguments wåith defaults from config
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=train_config.batch_size)
+    parser.add_argument('--learning_rate', type=float, default=train_config.learning_rate)
     parser.add_argument('--weight_decay', type=float, default=train_config.weight_decay)
     parser.add_argument('--tpu', action='store_true', default=train_config.tpu, help='Use TPU and load from GCS bucket')
     parser.add_argument('--wandb_project', type=str, default='nanogpt', help='Weights & Biases project name')
@@ -252,6 +254,7 @@ if __name__ == "__main__":
     # Update config with parsed arguments
     train_config = train_config.replace(
         batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         tpu=args.tpu
     )
@@ -261,7 +264,7 @@ if __name__ == "__main__":
         project=args.wandb_project,
         entity=args.wandb_entity,
         config={
-            "learning_rate": train_config.init_lr,
+            "learning_rate": train_config.learning_rate,
             "batch_size": train_config.batch_size,
             "weight_decay": train_config.weight_decay,
             "model_config": train_config.model_config.__dict__,
