@@ -50,9 +50,9 @@ class TrainConfig:
     def val_path(self) -> str:
         return f'{self.data_dir}/val.bin'
     
-    # Logging config
-    log_every: int = 500 # Interval for logging training loss
-    eval_every: int = 50 # Interval for logging validation loss
+    # Evaluation config
+    log_every: int = 100 # Interval for logging training loss
+    eval_every: int = 1000 # Interval for logging validation loss
 
     # Checkpoint read/write config
     checkpoint: bool = False
@@ -280,10 +280,10 @@ if __name__ == "__main__":
     total_loss = 0
     
     for step in range(train_config.train_steps):
-        if step % 100 == 0:
+        if step % train_config.log_every == 0:
             print(f"Step {step}/{train_config.train_steps}")
         
-        # Create per-device batches
+        # Create per-device batches for training
         key, batch_key = jax.random.split(key)
         batch_keys = jax.random.split(batch_key, train_config.num_devices)
         batches = [
@@ -312,6 +312,31 @@ if __name__ == "__main__":
 
         if step % 100 == 0:
             print(f"Training loss: {loss_value:.4f}")
+            
+        # Validation during training
+        if step % train_config.eval_every == 0:
+            val_total_loss = 0
+            num_val_batches = min(10, train_config.val_steps)  # Limit validation batches during training
+            
+            for val_step in range(num_val_batches):
+                key, val_batch_key = jax.random.split(key)
+                val_batch_keys = jax.random.split(val_batch_key, train_config.num_devices)
+                val_batches = [
+                    get_batch(k, val_data, train_config.per_device_batch_size, config.block_size)
+                    for k in val_batch_keys
+                ]
+                val_batch = jax.tree_map(lambda *x: jnp.stack(x), *val_batches)
+                
+                val_loss = eval_step(state, val_batch)
+                val_loss_value = jnp.mean(val_loss)
+                val_total_loss += val_loss_value
+            
+            avg_val_loss = val_total_loss / num_val_batches
+            print(f"Validation loss at step {step}: {avg_val_loss:.4f}")
+            wandb.log({
+                "val/loss": avg_val_loss,
+                "val/step": step,
+            }, step=global_step)
 
     avg_train_loss = total_loss / train_config.train_steps
     print(f"\nAverage training loss: {avg_train_loss:.4f}")
@@ -319,7 +344,7 @@ if __name__ == "__main__":
         "train/final_loss": avg_train_loss,
     }, step=global_step)
 
-    # Validation
+    # Final full validation
     val_total_loss = 0
     
     for step in range(train_config.val_steps):
@@ -334,12 +359,6 @@ if __name__ == "__main__":
         val_loss = eval_step(state, batch)
         val_loss_value = jnp.mean(val_loss)
         val_total_loss += val_loss_value
-        
-        # Log validation metrics
-        wandb.log({
-            "val/step_loss": val_loss_value,
-            "val/step": step,
-        }, step=global_step)
         
     avg_val_loss = val_total_loss / train_config.val_steps
     print(f"Final validation loss: {avg_val_loss:.4f}")
