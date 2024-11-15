@@ -23,8 +23,8 @@ class TrainConfig:
     
     # Training hyperparameters
     learning_rate: float = 6e-4
-    batch_size: int = 32 # Per device
-    weight_decay: float = 1e-2
+    batch_size: int = 16 # Per device
+    weight_decay: float = 1e-1
     train_steps: int = 200000
     val_steps: int = 100
     grad_clip: float = 1.0
@@ -36,7 +36,7 @@ class TrainConfig:
     warmup_steps: int = 2000
     decay_steps: int = 150000
     end_lr: float = 1e-5
-    
+
     # Choose data to be used [openwebtext, shakespeare]
     data_set: str = 'openwebtext'
     
@@ -140,11 +140,7 @@ def eval_step(train_state, batch) -> jnp.ndarray:
     output = train_state.apply_fn({'params': train_state.params}, x)
     logits = output[0] if isinstance(output, tuple) else output
     
-    # Shift targets to the right
-    logits = logits[:, :-1, :]
-    targets = y[:, 1:]
-    
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits, y)
     return jax.lax.pmean(jnp.mean(loss), axis_name='batch')
 
 def evaluate(key, train_state, val_ds, model, config) -> jnp.ndarray:
@@ -193,7 +189,7 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_clip),
         optax.adamw(
-            learning_rate=lr_schedule, # Use learning rate schedule
+            learning_rate=lr_schedule,
             b1=0.9,
             b2=0.95,
             weight_decay=config.weight_decay
@@ -248,7 +244,6 @@ if __name__ == "__main__":
     # Parse command line arguments wåith defaults from config
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=train_config.batch_size)
-    parser.add_argument('--learning_rate', type=float, default=train_config.learning_rate)
     parser.add_argument('--weight_decay', type=float, default=train_config.weight_decay)
     parser.add_argument('--tpu', action='store_true', default=train_config.tpu, help='Use TPU and load from GCS bucket')
     parser.add_argument('--wandb_project', type=str, default='nanogpt', help='Weights & Biases project name')

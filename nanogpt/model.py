@@ -136,11 +136,20 @@ class GPT2(nn.Module):
             x = Block(self.config, name=str(i))(x, mask, deterministic=deterministic)
 
         x = nn.LayerNorm(epsilon=1e-5, dtype=self.config.dtype, use_bias=self.config.use_bias, name='ln_f')(x)
-
-        logits = wte.attend(x)
+        
+        # Linear projection for output
+        logits = nn.Dense(
+            self.config.vocab_size,
+            dtype=self.config.dtype,
+            use_bias=self.config.use_bias,
+            name='lm_head'
+        )(x)
 
         if targets is not None:
-            loss = optax.softmax_cross_entropy_with_integer_labels(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)).mean()
+            loss = optax.softmax_cross_entropy_with_integer_labels(
+                logits.reshape(-1, logits.shape[-1]),
+                targets.reshape(-1)
+            ).mean()
         else:
             loss = None
 
