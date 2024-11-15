@@ -22,8 +22,7 @@ class TrainConfig:
     seed: int = 1337
     
     # Training hyperparameters
-    learning_rate: float = 6e-4
-    batch_size: int = 16 # Per device
+    batch_size: int = 8 # Per device
     weight_decay: float = 1e-1
     train_steps: int = 200000
     val_steps: int = 100
@@ -36,7 +35,7 @@ class TrainConfig:
     warmup_steps: int = 2000
     decay_steps: int = 150000
     end_lr: float = 1e-5
-
+    
     # Choose data to be used [openwebtext, shakespeare]
     data_set: str = 'openwebtext'
     
@@ -78,7 +77,7 @@ class TrainConfig:
     @property
     def per_device_batch_size(self) -> int:
         """Batch size per device"""
-        return self.batch_size // self.num_devices
+        return self.batch_size
     
     def __post_init__(self):
         print(f"Initialized training config:")
@@ -189,7 +188,7 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_clip),
         optax.adamw(
-            learning_rate=lr_schedule,
+            learning_rate=lr_schedule, # Use learning rate schedule
             b1=0.9,
             b2=0.95,
             weight_decay=config.weight_decay
@@ -253,7 +252,6 @@ if __name__ == "__main__":
     # Update config with parsed arguments
     train_config = train_config.replace(
         batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         tpu=args.tpu
     )
@@ -263,7 +261,7 @@ if __name__ == "__main__":
         project=args.wandb_project,
         entity=args.wandb_entity,
         config={
-            "learning_rate": train_config.learning_rate,
+            "learning_rate": train_config.init_lr,
             "batch_size": train_config.batch_size,
             "weight_decay": train_config.weight_decay,
             "model_config": train_config.model_config.__dict__,
