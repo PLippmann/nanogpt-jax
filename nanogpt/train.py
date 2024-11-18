@@ -22,26 +22,26 @@ class TrainConfig:
     seed: int = 1337
     
     # Training hyperparameters
-    learning_rate: float = 6e-4
+    learning_rate: float = 2e-4 # Peak learning rate
     batch_size: int = 8 # Per device
     weight_decay: float = 1e-1
-    train_steps: int = 200000
+    train_steps: int = 300000
     val_steps: int = 100
     grad_clip: float = 1.0
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 4
 
     # Learning rate schedule config
     init_lr: float = 0.0
-    peak_lr: float = 2.5e-4
+    peak_lr: float = learning_rate
     warmup_steps: int = 2000
-    decay_steps: int = 150000
+    decay_steps: int = train_steps
     end_lr: float = 1e-5
     
     # Choose data to be used [openwebtext, shakespeare]
     data_set: str = 'openwebtext'
     
     # GCP data source config
-    tpu: bool = False
+    tpu: bool = True
     bucket_name: str = 'nano-openwebtext'
     
     # Data config
@@ -53,7 +53,7 @@ class TrainConfig:
     
     @property
     def train_path(self) -> str:
-        return f'{self.data_dir}/val.bin'
+        return f'{self.data_dir}/train.bin'
     
     @property
     def val_path(self) -> str:
@@ -73,12 +73,12 @@ class TrainConfig:
     @property
     def global_batch_size(self) -> int:
         """Total batch size across all devices"""
-        return self.batch_size * self.num_devices
+        return self.batch_size * self.num_devices * self.gradient_accumulation_steps
     
     @property
     def per_device_batch_size(self) -> int:
         """Batch size per device"""
-        return self.batch_size // self.num_devices
+        return self.batch_size
     
     def __post_init__(self):
         print(f"Initialized training config:")
@@ -189,11 +189,12 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_clip),
         optax.adamw(
-            learning_rate=lr_schedule, # Use learning rate schedule
+            learning_rate=lr_schedule,
             b1=0.9,
             b2=0.95,
             weight_decay=config.weight_decay
         ),
+        optax.scale(1.0 / config.gradient_accumulation_steps),
         optax.apply_every(config.gradient_accumulation_steps),
     )
     
@@ -326,7 +327,7 @@ if __name__ == "__main__":
             for k in batch_keys
         ]
         # Stack for pmap
-        batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
+        batch = jax.tree.map(lambda *x: jnp.stack(x), *batches)
         
         # Update dropout keys
         dropout_keys = jax.random.split(dropout_key[0], train_config.num_devices)
@@ -364,7 +365,7 @@ if __name__ == "__main__":
                     get_batch(k, val_data, train_config.per_device_batch_size, config.block_size)
                     for k in val_batch_keys
                 ]
-                val_batch = jax.tree_map(lambda *x: jnp.stack(x), *val_batches)
+                val_batch = jax.tree.map(lambda *x: jnp.stack(x), *val_batches)
                 
                 val_loss = eval_step(state, val_batch)
                 val_loss_value = jnp.mean(val_loss)
@@ -393,7 +394,7 @@ if __name__ == "__main__":
             get_batch(k, val_data, train_config.per_device_batch_size, config.block_size)
             for k in batch_keys
         ]
-        batch = jax.tree_map(lambda *x: jnp.stack(x), *batches)
+        batch = jax.tree.map(lambda *x: jnp.stack(x), *batches)
         
         val_loss = eval_step(state, batch)
         val_loss_value = jnp.mean(val_loss)
