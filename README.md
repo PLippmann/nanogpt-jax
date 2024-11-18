@@ -17,9 +17,17 @@ Clone the repository
 ```
 git clone https://github.com/plippmann/nanogpt-jax && cd nanogpt-jax
 ```
+Set up the environment
+```
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+source ~/miniconda3/bin/activate
+conda create -n myenv python=3.10
+conda activate myenv
+```
 Install the requirements
 ```
-pip -r requirements.txt
+pip install -r requirements.txt
 ```
 Prepare the data
 ```
@@ -39,7 +47,7 @@ More to follow...
 Create a TPU VM
 ```
 ZONE=europe-west4-a
-TPU_TYPE=v3-32
+TPU_TYPE=v3-8
 VM_NAME=jax-gpt-v3-8
 
 gcloud alpha compute tpus tpu-vm create $VM_NAME \
@@ -54,7 +62,7 @@ gcloud alpha compute tpus tpu-vm ssh $VM_NAME --zone=$ZONE
 ```
 And finally run the training script with default settings
 ```
-python train.py --tpu
+python train.py
 ```
 
 ## Useful Resources
