@@ -22,20 +22,21 @@ class TrainConfig:
     seed: int = 1337
     
     # Training hyperparameters
-    learning_rate: float = 2e-4 # Peak learning rate
-    batch_size: int = 8 # Per device
+    learning_rate: float = 6e-4
+    batch_size: int = 16 # Per device
     weight_decay: float = 1e-1
     train_steps: int = 300000
     val_steps: int = 100
     grad_clip: float = 1.0
     gradient_accumulation_steps: int = 4
+    adam_eps: float = 1e-5 # This alledgedly helps with convergence
 
     # Learning rate schedule config
-    init_lr: float = 0.0
+    init_lr: float = 1e-8
     peak_lr: float = learning_rate
     warmup_steps: int = 2000
-    decay_steps: int = train_steps
-    end_lr: float = 1e-5
+    decay_steps: int = 100000
+    end_lr: float = learning_rate * 0.1
     
     # Choose data to be used [openwebtext, shakespeare]
     data_set: str = 'openwebtext'
@@ -187,15 +188,16 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
 
     # Create optimizer with weight decay and gradient clipping
     tx = optax.chain(
-        optax.clip_by_global_norm(config.grad_clip),
+        optax.apply_every(config.gradient_accumulation_steps),  # First accumulate gradients
+        optax.scale(1.0 / config.gradient_accumulation_steps),  # Then scale the accumulated gradients
+        optax.clip_by_global_norm(config.grad_clip),           # Clip the scaled accumulated gradients
         optax.adamw(
             learning_rate=lr_schedule,
             b1=0.9,
             b2=0.95,
-            weight_decay=config.weight_decay
-        ),
-        optax.scale(1.0 / config.gradient_accumulation_steps),
-        optax.apply_every(config.gradient_accumulation_steps),
+            weight_decay=config.weight_decay,
+            eps=config.adam_eps
+        )
     )
     
     return TrainState.create(
@@ -207,14 +209,22 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
 def get_batch(key, data, batch_size, block_size):
     """Get a random batch of data."""
     data_len = len(data)
-    adjusted_max_start_idx = min(data_len - block_size - 1, np.iinfo(np.int32).max)
+    # Adjust the maximum start index to ensure we always have enough tokens
+    # for a full sequence of block_size + 1
+    adjusted_max_start_idx = data_len - block_size - 1
+    
+    if adjusted_max_start_idx <= 0:
+        raise ValueError(f"Data length ({data_len}) must be greater than block_size + 1 ({block_size + 1})")
+    
+    # Ensure we don't exceed maximum integer value
+    adjusted_max_start_idx = min(adjusted_max_start_idx, np.iinfo(np.int64).max)
     
     ix = jax.random.randint(
         key, 
         (batch_size,), 
         0, 
         adjusted_max_start_idx,
-        dtype=jnp.int32
+        dtype=jnp.int64
     )
     
     x = jnp.stack([data[i:i+block_size] for i in ix])
