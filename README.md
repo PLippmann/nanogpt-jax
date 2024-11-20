@@ -25,6 +25,10 @@ source ~/miniconda3/bin/activate
 conda create -n myenv python=3.10
 conda activate myenv
 ```
+Install the TPU version of Jax
+```
+pip install -U "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+```
 Install the requirements
 ```
 pip install -r requirements.txt
@@ -63,6 +67,10 @@ gcloud alpha compute tpus tpu-vm ssh $VM_NAME --zone=$ZONE
 And finally run the training script with default settings
 ```
 python train.py
+```
+Don't forget to delete the VM after you're done
+```
+gcloud alpha compute tpus tpu-vm delete $VM_NAME --zone=$ZONE
 ```
 
 ## Useful Resources
