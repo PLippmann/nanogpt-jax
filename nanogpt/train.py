@@ -186,19 +186,17 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
         end_value=config.end_lr
     )
 
-    # Create optimizer with weight decay and gradient clipping
     tx = optax.chain(
-        optax.apply_every(config.gradient_accumulation_steps),  # First accumulate gradients
-        optax.scale(1.0 / config.gradient_accumulation_steps),  # Then scale the accumulated gradients
-        optax.clip_by_global_norm(config.grad_clip),           # Clip the scaled accumulated gradients
-        optax.adamw(
+        optax.clip_by_global_norm(config.grad_clip),
+        optax.inject_hyperparams(optax.adamw)(
             learning_rate=lr_schedule,
             b1=0.9,
             b2=0.95,
             weight_decay=config.weight_decay,
-            eps=config.adam_eps
-        )
+            #mask=param_decay_mask(gpt_params), #TODO implement param decay
+        ),
     )
+    tx = optax.MultiSteps(tx, every_k_schedule=config.gradient_accumulation_steps)
     
     return TrainState.create(
         apply_fn=model.apply,
@@ -215,7 +213,7 @@ def get_batch(key, data, batch_size, block_size):
     if adjusted_max_start_idx <= 0:
         raise ValueError(f"Data length ({data_len}) must be greater than block_size + 1 ({block_size + 1})")
     
-    # Generate random floats in [0, 1) and scale them
+    # Generate random floats in [0, 1) and scale them to our desired range
     random_floats = jax.random.uniform(key, (batch_size,))
     ix = (random_floats * adjusted_max_start_idx).astype(jnp.int32)
     
