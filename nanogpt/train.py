@@ -32,10 +32,10 @@ class TrainConfig:
     adam_eps: float = 1e-5 # This alledgedly helps with convergence
 
     # Learning rate schedule config
-    init_lr: float = 1e-8
+    init_lr: float = learning_rate * 0.1
     peak_lr: float = learning_rate
     warmup_steps: int = 2000
-    decay_steps: int = 100000
+    decay_steps: int = train_steps * 0.8
     end_lr: float = learning_rate * 0.1
     
     # Choose data to be used [openwebtext, shakespeare]
@@ -210,22 +210,14 @@ def get_batch(key, data, batch_size, block_size):
     """Get a random batch of data."""
     data_len = len(data)
     # Adjust the maximum start index to ensure we always have enough tokens
-    # for a full sequence of block_size + 1
     adjusted_max_start_idx = data_len - block_size - 1
     
     if adjusted_max_start_idx <= 0:
         raise ValueError(f"Data length ({data_len}) must be greater than block_size + 1 ({block_size + 1})")
     
-    # Ensure we don't exceed maximum integer value
-    adjusted_max_start_idx = min(adjusted_max_start_idx, np.iinfo(np.int64).max)
-    
-    ix = jax.random.randint(
-        key, 
-        (batch_size,), 
-        0, 
-        adjusted_max_start_idx,
-        dtype=jnp.int64
-    )
+    # Generate random floats in [0, 1) and scale them
+    random_floats = jax.random.uniform(key, (batch_size,))
+    ix = (random_floats * adjusted_max_start_idx).astype(jnp.int32)
     
     x = jnp.stack([data[i:i+block_size] for i in ix])
     y = jnp.stack([data[i+1:i+block_size+1] for i in ix])

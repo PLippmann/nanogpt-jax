@@ -57,7 +57,7 @@ VM_NAME=jax-gpt-v3-8
 gcloud alpha compute tpus tpu-vm create $VM_NAME \
     --zone=$ZONE \
     --accelerator-type=$TPU_TYPE \
-    --version=v2-tf-stable \
+    --version=tpu-ubuntu2204-base \
     --preemptible
 ```
 SSH into the VM
