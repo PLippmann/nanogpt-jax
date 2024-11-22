@@ -12,6 +12,8 @@ import argparse
 from model import GPT2, GPT2Config
 from functools import partial
 import wandb
+import time
+
 
 @struct.dataclass
 class TrainConfig:
@@ -262,17 +264,38 @@ if __name__ == "__main__":
         tpu=args.tpu
     )
 
-    # Initialize wandb
+    # Initialize wandb with expanded config
     wandb.init(
         project=args.wandb_project,
         entity=args.wandb_entity,
         config={
+            # Model hyperparameters
             "learning_rate": train_config.learning_rate,
-            "batch_size": train_config.batch_size,
+            "batch_size": train_config.global_batch_size,
+            "per_device_batch_size": train_config.per_device_batch_size,
             "weight_decay": train_config.weight_decay,
-            "model_config": train_config.model_config.__dict__,
+            "grad_clip": train_config.grad_clip,
+            "gradient_accumulation_steps": train_config.gradient_accumulation_steps,
+            "adam_eps": train_config.adam_eps,
+            
+            # Learning rate schedule
+            "init_lr": train_config.init_lr,
+            "peak_lr": train_config.peak_lr,
+            "warmup_steps": train_config.warmup_steps,
+            "decay_steps": train_config.decay_steps,
+            "end_lr": train_config.end_lr,
+            
+            # Training setup
+            "train_steps": train_config.train_steps,
+            "val_steps": train_config.val_steps,
+            "num_devices": train_config.num_devices,
+            "seed": train_config.seed,
+            
+            # Data config
             "dataset": train_config.data_set,
-        }
+            "model_config": train_config.model_config.__dict__,
+        },
+        tags=[train_config.data_set, "tpu" if train_config.tpu else "cpu/gpu"]
     )
 
     # Initialize random key
@@ -313,6 +336,7 @@ if __name__ == "__main__":
     print("\nStarting training...")
     global_step = 0
     total_loss = 0
+    last_log_time = time.time()  # Initialize timing
     
     # Create replicated step counter for pmap
     step_counter = jnp.zeros((train_config.num_devices,), dtype=jnp.int32)
@@ -342,18 +366,21 @@ if __name__ == "__main__":
         total_loss += loss_value
         global_step += 1
 
-        # Log training metrics
+        # Enhanced training metrics logging
         if step % train_config.log_every == 0:
-            current_lr = lr_schedule(step)  # Get learning rate for logging
-            print(f"Step {step}, Loss: {loss_value:.4f}, LR: {current_lr:.6f}, Grad norm: {grad_norm_value:.4f}")
-            
-            wandb.log({
+            current_lr = lr_schedule(step)
+            metrics = {
                 "train/loss": loss_value,
                 "train/learning_rate": current_lr,
                 "train/grad_norm": grad_norm_value,
                 "train/step": step,
                 "train/global_step": global_step,
-            }, step=global_step)
+                "train/epoch": (global_step * train_config.global_batch_size) / len(train_data),
+                "performance/steps_per_second": train_config.log_every / (time.time() - last_log_time),
+                "performance/samples_per_second": (train_config.log_every * train_config.global_batch_size) / (time.time() - last_log_time),
+            }
+            wandb.log(metrics, step=global_step)
+            last_log_time = time.time()
 
         # Validation during training
         if step % train_config.eval_every == 0:
