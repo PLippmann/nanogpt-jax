@@ -26,19 +26,19 @@ class TrainConfig:
     
     # Training hyperparameters
     learning_rate: float = 6e-4
-    batch_size: int = 16 # Per device
+    batch_size: int = 2 # Per device. On TPU v3-8 convergence is unlikely with batch_size >= 8. See https://github.com/karpathy/nanoGPT/issues/554.
     weight_decay: float = 1e-1
     train_steps: int = 300000
     val_steps: int = 100
     grad_clip: float = 1.0
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 40
     adam_eps: float = 1e-5 # This alledgedly helps with convergence
 
     # Learning rate schedule config
     init_lr: float = learning_rate * 0.1
     peak_lr: float = learning_rate
     warmup_steps: int = 2000
-    decay_steps: int = train_steps * 0.8
+    decay_steps: int = train_steps * 0.9
     end_lr: float = learning_rate * 0.1
     
     # Choose data to be used [openwebtext, shakespeare]
@@ -46,7 +46,7 @@ class TrainConfig:
     
     # GCP data source config
     tpu: bool = True
-    bucket_name: str = 'nano-openwebtext'
+    bucket_name: str = 'nano-openwebtext' # Change this to your bucket name TODO set this via cli
     
     # Data config
     @property

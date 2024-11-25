@@ -4,7 +4,7 @@ A high-performance JAX/Flax implementation of [NanoGPT](https://github.com/karpa
 
 ## Overview
 
-This project reimplements Andrej Karpathy's NanoGPT in JAX, focusing on performance and scalability. It leverages JAX's automatic differentiation and compilation capabilities along with Flax's neural network layers to create an efficient and maintainable codebase.
+This project reimplements Andrej Karpathy's NanoGPT in JAX, focusing on performance and scalability. It leverages JAX's automatic differentiation and compilation capabilities along with Flax's neural network layers to create an efficient and maintainable codebase that runs distributedly on TPUs.
 
 ### Core Features
 - 🚀 Full JAX/Flax implementation optimized for TPUs
@@ -14,33 +14,14 @@ This project reimplements Andrej Karpathy's NanoGPT in JAX, focusing on performa
 - 💾 Support for inference straight from pretrained weights
 - 🎯 Cosine learning rate schedule with warmup
 
-### Project Status
-1. ~~Implement the model in JAX~~
-2. ~~Write tests~~
-3. ~~Load pretrained weights~~
-4. ~~Perform inference from pretrained weights~~
-5. ~~Train the model on TPUs~~
-6. ~~Make it fast with @pmap/@jit~~
-7. Run inference on the trained model
-8. Post-training fun
-9. Implement RoPE, Muon optimizer, and other improvements
+### Training Results
+We reach a validation loss of 3.53 after 300k steps. This took roughly 14 hours on a TPU v3-8, though it hadn't fully converged at that point.
 
-## Structure
-```
-nanogpt-jax/
-├── nanogpt/
-│   ├── model.py      # Core GPT-2 implementation
-│   ├── train.py      # Training loop and configuration
-│   └── inference.py  # Text generation utilities
-│   └── pretrained.py # Load pretrained weights
-├── data/
-│   └── openwebtext/
-│       ├── prepare.py # Get data
-│   └── shakespeare/
-│       ├── prepare.py # Get data
-├── tests.py           # Sanity checks
-└── requirements.txt
-```
+![Loss Plot](assets/loss_plot_high_quality.svg)
+
+[![Weights & Biases](https://img.shields.io/badge/WandB-Logs-yellow?logo=wandb)](https://wandb.ai/teateam/NanoGPT/runs/6fak07c3/workspace?nw=rm8x5n4anij)
+
+Additionally, when training on a TPU, we hit an average duty cycle of 77%, indicating good accelerator utilization.
 
 ## Installation
 
@@ -68,6 +49,23 @@ pip install -U "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_
 pip install -r requirements.txt
 ```
 
+## Structure
+```
+nanogpt-jax/
+├── nanogpt/
+│   ├── model.py      # Core GPT-2 implementation
+│   ├── train.py      # Training loop and configuration
+│   ├── inference.py  # Text generation utilities
+│   ├── pretrained.py # Load pretrained weights
+│   └── tests.py      # Sanity checks for model.py
+├── data/
+│   └── openwebtext/
+│       └── prepare.py # Get data
+│   └── shakespeare/
+│       └── prepare.py # Get data
+└── requirements.txt
+```
+
 ## Implementation Details
 
 ### Model Architecture
@@ -82,6 +80,17 @@ pip install -r requirements.txt
 - AdamW optimizer for now
 - Integrated W&B logging for training metrics
 
+### Project Status
+1. ~~Implement the model in JAX~~
+2. ~~Write tests~~
+3. ~~Load pretrained weights~~
+4. ~~Perform inference from pretrained weights~~
+5. ~~Train the model on TPUs~~
+6. ~~Make it fast with @pmap/@jit~~
+7. Run inference on the trained model
+8. Post-training fun
+9. Implement RoPE, Muon optimizer, and other improvements
+
 ### TPU Training Guide
 
 1. Prepare training data:
@@ -90,7 +99,7 @@ python data/openwebtext/prepare.py
 ```
 Upload the resulting `train.bin` and `val.bin` to your GCP storage bucket.
 
-2. Create a TPU VM:
+1. Create a TPU VM:
 ```bash
 ZONE=europe-west4-a
 TPU_TYPE=v3-8
