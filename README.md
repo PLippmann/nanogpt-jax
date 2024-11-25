@@ -19,7 +19,7 @@ We reach a validation loss of 3.53 after 300k steps. This took roughly 14 hours 
 
 ![Loss Plot](assets/loss_plot_high_quality.svg)
 
-[![Weights & Biases](https://img.shields.io/badge/WandB-Logs-yellow?logo=wandb)](https://wandb.ai/teateam/NanoGPT/runs/6fak07c3/workspace?nw=rm8x5n4anij)
+[![Weights & Biases](https://img.shields.io/badge/WandB-Logs-yellow?logo=wandb)](https://wandb.ai/teateam/nanogpt-jax?nw=5mvml05axlm)
 
 Additionally, when training on a TPU, we hit an average duty cycle of 77%, indicating good accelerator utilization.
 
