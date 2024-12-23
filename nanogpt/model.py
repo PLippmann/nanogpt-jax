@@ -18,7 +18,41 @@ class GPT2Config:
     n_heads: int = 12
     dropout: float = 0.0
     use_bias: bool = True
+    rope_base: int = 10000  # Base for RoPE calculations
     dtype: Optional[str] = jnp.bfloat16 if jax.devices()[0].device_kind == "TPU" else jnp.float16
+
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    """Precompute the frequency tensor for complex exponentials (cis) with given dimensions."""
+    freqs = 1.0 / (theta ** (jnp.arange(0, dim // 2).astype(jnp.float32) / (dim // 2)))
+    t = jnp.arange(end)
+    freqs = jnp.outer(t, freqs)  # [end, dim//2]
+    # Create complex rotations
+    return jnp.stack([jnp.cos(freqs), jnp.sin(freqs)], axis=-1)  # [end, dim//2, 2]
+
+def apply_rotary_emb(x, freqs_cis):
+    """Apply rotary embeddings to input tensors using precomputed frequencies."""
+    # reshape xq, xk to [batch..., seq_len, n_heads, head_dim//2, 2]
+    x_reshape = x.reshape(*x.shape[:-1], -1, 2)
+    
+    # Create complex numbers from pairs of real numbers
+    x_real, x_imag = x_reshape[..., 0], x_reshape[..., 1]
+    x_complex = x_real + 1j * x_imag
+    
+    # Create complex rotation
+    freqs_cos = freqs_cis[..., 0]
+    freqs_sin = freqs_cis[..., 1]
+    freqs_complex = freqs_cos + 1j * freqs_sin
+    
+    # Apply complex rotation
+    x_rotated = x_complex * freqs_complex
+    
+    # Convert back to real numbers
+    x_out_real = jnp.real(x_rotated)
+    x_out_imag = jnp.imag(x_rotated)
+    x_out = jnp.stack([x_out_real, x_out_imag], axis=-1)
+    
+    # Restore original shape
+    return x_out.reshape(x.shape)
 
 class SelfAttentionFlax(nn.Module):
     """TODO Check speed vs self written."""
@@ -43,18 +77,30 @@ class SelfAttention(nn.Module):
 
     @nn.compact
     def __call__(self, x, mask=None, deterministic=False):
-        """Multi-head self-attention mechanism."""
+        """Multi-head self-attention mechanism with RoPE."""
         B, T, C = x.shape # B: batch size, T: sequence length, C: channel size
         head_dim = C // self.config.n_heads
+        assert head_dim % 2 == 0, "Head dimension must be divisible by 2 for RoPE"
         
-        # Query, key, value projections  (B, T, C) -> (B, n_heads, T, head_dim)
+        # Query, key, value projections  (B, T, C) -> (B, T, n_heads, head_dim)
         qkv = nn.Dense(3 * C, use_bias=self.config.use_bias, dtype=self.config.dtype, name='c_attn')(x)
-        qkv = qkv.reshape(B, T, 3 * self.config.n_heads, head_dim)
+        qkv = qkv.reshape(B, T, 3, self.config.n_heads, head_dim)
         q, k, v = jnp.array_split(qkv, 3, axis=2)
+        q = q.squeeze(2)  # Remove the split dimension
+        k = k.squeeze(2)
+        v = v.squeeze(2)
         
-        # Calculate attention matrix. Attn weight shape is (batch..., num_heads, q_length, kv_length)
+        # Compute RoPE embeddings
+        freqs_cis = precompute_freqs_cis(head_dim, T, self.config.rope_base)
+        freqs_cis = jnp.expand_dims(freqs_cis, axis=1)  # [T, 1, dim//2, 2]
+        
+        # Apply RoPE to queries and keys
+        q_roped = apply_rotary_emb(q, freqs_cis)
+        k_roped = apply_rotary_emb(k, freqs_cis)
+        
+        # Calculate attention matrix
         scale = 1.0 / jnp.sqrt(head_dim).astype(self.config.dtype)
-        attn = jnp.einsum('...qhd,...khd->...hqk', q, k) * scale
+        attn = jnp.einsum('bthd,bkhd->bhtk', q_roped, k_roped) * scale
 
         # Create causal mask and combine with attention scores
         if mask is not None:
@@ -67,7 +113,7 @@ class SelfAttention(nn.Module):
         attn = nn.Dropout(self.config.dropout)(attn, deterministic=deterministic)
 
         # Return weighted sum over values for each query position
-        x = jnp.einsum('...hqk,...khd->...qhd', attn, v).reshape(B, T, C)
+        x = jnp.einsum('bhtk,bkhd->bthd', attn, v).reshape(B, T, C)
         x = nn.Dense(C, use_bias=self.config.use_bias, dtype=self.config.dtype, name='c_proj')(x)
         x = nn.Dropout(rate=self.config.dropout)(x, deterministic=deterministic)
         return x
@@ -125,12 +171,9 @@ class GPT2(nn.Module):
         # Create causal mask (1s in lower triangle, 0s elsewhere)
         mask = jnp.tril(jnp.ones((T, T)))
 
-        # Token and positional embeddings
-        positions = jnp.arange(0, T)[None]
+        # Token embeddings
         wte = nn.Embed(self.config.vocab_size, self.config.n_embd, dtype=self.config.dtype, name='wte')
-        wpe = nn.Embed(self.config.block_size, self.config.n_embd, dtype=self.config.dtype, name='wpe')
-
-        x = nn.Dropout(rate=self.config.dropout)(wte(inputs) + wpe(positions), deterministic=deterministic)
+        x = nn.Dropout(rate=self.config.dropout)(wte(inputs), deterministic=deterministic)
 
         for i in range(self.config.n_layers):
             x = Block(self.config, name=str(i))(x, mask, deterministic=deterministic)
