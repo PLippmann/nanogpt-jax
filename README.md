@@ -89,7 +89,7 @@ nanogpt-jax/
 6. ~~Make it fast with @pmap/@jit~~
 7. Run inference on the trained model
 8. Post-training fun
-9. Implement RoPE, Muon optimizer, and other improvements
+9. ~~Implement RoPE, Muon optimizer, and other improvements~~
 
 ### TPU Training Guide
 
