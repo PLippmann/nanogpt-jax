@@ -13,6 +13,8 @@ from model import GPT2, GPT2Config
 from functools import partial
 import wandb
 import time
+import os
+from flax.training import checkpoints
 
 
 @struct.dataclass
@@ -69,7 +71,9 @@ class TrainConfig:
 
     # Checkpoint read/write config
     checkpoint: bool = False
-    output_dir: str = 'out' # TODO implement checkpointing
+    output_dir: str = 'output' # Relative path from the project root
+    checkpoint_every: int = 1000 # Save checkpoint every N steps
+    best_val_loss: float = float('inf') # Track best validation loss for checkpointing
     
     # TPU config
     num_devices: int = jax.device_count()
@@ -83,6 +87,16 @@ class TrainConfig:
     def per_device_batch_size(self) -> int:
         """Batch size per device"""
         return self.batch_size
+    
+    @property
+    def checkpoint_dir(self) -> str:
+        """Get absolute path for checkpoint directory.
+        Converts relative paths to absolute paths relative to the project root."""
+        if os.path.isabs(self.output_dir):
+            return self.output_dir
+        # Get the project root directory (parent of the script directory)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.abspath(os.path.join(project_root, self.output_dir))
     
     def __post_init__(self):
         print(f"Initialized training config:")
@@ -168,12 +182,78 @@ def count_params(params: FrozenDict) -> int:
     """Count the number of parameters in the model."""
     return sum(x.size for x in jax.tree_util.tree_leaves(params))
 
+def save_checkpoint(state, config: TrainConfig, step: int, is_best: bool = False):
+    """Save a checkpoint of the model."""
+    # Create checkpoint directory if it doesn't exist
+    checkpoint_dir = config.checkpoint_dir
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Save unreplicated state
+    state_dict = flax.jax_utils.unreplicate(state)
+    
+    # For logging purposes, get the relative path from current directory
+    rel_path = os.path.relpath(checkpoint_dir, os.path.dirname(os.path.abspath(__file__)))
+    
+    # Save latest checkpoint (always overwrite)
+    checkpoints.save_checkpoint(
+        ckpt_dir=checkpoint_dir,
+        target=state_dict,
+        step=step,
+        overwrite=True,
+        prefix='checkpoint_latest_'
+    )
+    print(f"Saved latest checkpoint at step {step} to {rel_path}")
+    
+    # If this is the best model so far, save it separately
+    if is_best:
+        checkpoints.save_checkpoint(
+            ckpt_dir=checkpoint_dir,
+            target=state_dict,
+            step=step,
+            overwrite=True,
+            prefix='checkpoint_best_'
+        )
+        print(f"Saved best checkpoint at step {step} to {rel_path}")
+
+def load_checkpoint(config: TrainConfig):
+    """Load the latest checkpoint."""
+    checkpoint_dir = config.checkpoint_dir
+    
+    # Try to load the best checkpoint first
+    restored = checkpoints.restore_checkpoint(
+        ckpt_dir=checkpoint_dir,
+        target=None,
+        prefix='checkpoint_best_'
+    )
+    if restored is not None:
+        print("Restored from best checkpoint")
+        return restored
+        
+    # Fall back to latest checkpoint
+    restored = checkpoints.restore_checkpoint(
+        ckpt_dir=checkpoint_dir,
+        target=None,
+        prefix='checkpoint_latest_'
+    )
+    if restored is not None:
+        print("Restored from latest checkpoint")
+    return restored
+
 def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[int, int]) -> TrainState:
     """Initialize the training state."""
     print("\nInitializing training state...")
     
     if config.checkpoint:
-        pass # TODO implement checkpointing
+        # Try to restore checkpoint
+        restored_state = load_checkpoint(config)
+        if restored_state is not None:
+            print("Restored from checkpoint")
+            params = restored_state['params']
+        else:
+            print("No checkpoint found, initializing from scratch")
+            model = GPT2(config.model_config)
+            params = model.init(key)
+            params = params['params']
     else:
         # Initialize params
         model = GPT2(config.model_config)
@@ -196,7 +276,6 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
             b1=0.9,
             b2=0.95,
             weight_decay=config.weight_decay,
-            #mask=param_decay_mask(gpt_params), #TODO implement param decay
         ),
     )
     tx = optax.MultiSteps(tx, every_k_schedule=config.gradient_accumulation_steps)
@@ -205,7 +284,7 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
         apply_fn=model.apply,
         params=params,
         tx=tx
-    ), lr_schedule  # Return the schedule along with the state
+    ), lr_schedule
 
 def get_batch(key, data, batch_size, block_size):
     """Get a random batch of data."""
@@ -246,7 +325,7 @@ if __name__ == "__main__":
     # Create initial config with defaults
     train_config = TrainConfig(model_config=config)
 
-    # Parse command line arguments wåith defaults from config
+    # Parse command line arguments with defaults from config
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=train_config.batch_size)
     parser.add_argument('--learning_rate', type=float, default=train_config.learning_rate)
@@ -254,6 +333,8 @@ if __name__ == "__main__":
     parser.add_argument('--tpu', action='store_true', default=train_config.tpu, help='Use TPU and load from GCS bucket')
     parser.add_argument('--wandb_project', type=str, default='nanogpt', help='Weights & Biases project name')
     parser.add_argument('--wandb_entity', type=str, default=None, help='Weights & Biases entity name')
+    parser.add_argument('--checkpoint', action='store_true', default=train_config.checkpoint, help='Enable checkpointing')
+    parser.add_argument('--output_dir', type=str, default=train_config.output_dir, help='Directory to save checkpoints')
     args = parser.parse_args()
 
     # Update config with parsed arguments
@@ -261,7 +342,9 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
-        tpu=args.tpu
+        tpu=args.tpu,
+        checkpoint=args.checkpoint,
+        output_dir=args.output_dir
     )
 
     # Initialize wandb with expanded config
@@ -366,6 +449,16 @@ if __name__ == "__main__":
         total_loss += loss_value
         global_step += 1
 
+        # Save checkpoint every checkpoint_every steps if checkpointing is enabled
+        if train_config.checkpoint and step > 0 and step % train_config.checkpoint_every == 0:
+            save_checkpoint(state, train_config, step, is_best=False)
+            # Log checkpoint saving to wandb using relative path
+            rel_path = os.path.relpath(train_config.checkpoint_dir, os.path.dirname(os.path.abspath(__file__)))
+            wandb.log({
+                "checkpoint/step": step,
+                "checkpoint/path": os.path.join(rel_path, f"checkpoint_latest_{step}")
+            }, step=global_step)
+
         # Enhanced training metrics logging
         if step % train_config.log_every == 0:
             current_lr = lr_schedule(step)
@@ -402,9 +495,19 @@ if __name__ == "__main__":
             
             avg_val_loss = val_total_loss / num_val_batches
             print(f"Validation loss at step {step}: {avg_val_loss:.4f}")
+            
+            # Check if this is the best model so far
+            is_best = avg_val_loss < train_config.best_val_loss
+            if is_best:
+                train_config = train_config.replace(best_val_loss=avg_val_loss)
+                if train_config.checkpoint:
+                    save_checkpoint(state, train_config, step, is_best=True)
+                    print(f"New best validation loss: {avg_val_loss:.4f}, saved checkpoint")
+            
             wandb.log({
                 "val/loss": avg_val_loss,
                 "val/step": step,
+                "val/best_loss": train_config.best_val_loss,
             }, step=global_step)
 
     avg_train_loss = total_loss / train_config.train_steps
@@ -434,6 +537,11 @@ if __name__ == "__main__":
     wandb.log({
         "val/final_loss": avg_val_loss,
     }, step=global_step)
+
+    # Save final checkpoint if checkpointing is enabled
+    if train_config.checkpoint:
+        save_checkpoint(state, train_config, train_config.train_steps, is_best=False)
+        print("Saved final checkpoint")
 
     print("\nTraining complete!")
     wandb.finish()
