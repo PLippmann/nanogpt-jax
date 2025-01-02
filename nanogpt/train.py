@@ -188,8 +188,13 @@ def save_checkpoint(state, config: TrainConfig, step: int, is_best: bool = False
     checkpoint_dir = config.checkpoint_dir
     os.makedirs(checkpoint_dir, exist_ok=True)
     
-    # Save unreplicated state
+    # Save unreplicated state and current step
     state_dict = flax.jax_utils.unreplicate(state)
+    save_dict = {
+        'state': state_dict,
+        'step': step,
+        'best_val_loss': config.best_val_loss
+    }
     
     # For logging purposes, get the relative path from current directory
     rel_path = os.path.relpath(checkpoint_dir, os.path.dirname(os.path.abspath(__file__)))
@@ -197,23 +202,23 @@ def save_checkpoint(state, config: TrainConfig, step: int, is_best: bool = False
     # Save latest checkpoint (always overwrite)
     checkpoints.save_checkpoint(
         ckpt_dir=checkpoint_dir,
-        target=state_dict,
+        target=save_dict,
         step=step,
         overwrite=True,
         prefix='checkpoint_latest_'
     )
     print(f"Saved latest checkpoint at step {step} to {rel_path}")
     
-    # If this is the best model so far, save it separately
+    # If this is the best model so far, save it separately (always overwrite)
     if is_best:
         checkpoints.save_checkpoint(
             ckpt_dir=checkpoint_dir,
-            target=state_dict,
+            target=save_dict,
             step=step,
-            overwrite=True,
+            overwrite=True,  # Always overwrite the best checkpoint
             prefix='checkpoint_best_'
         )
-        print(f"Saved best checkpoint at step {step} to {rel_path}")
+        print(f"Saved new best checkpoint at step {step} to {rel_path} (val_loss: {config.best_val_loss:.4f})")
 
 def load_checkpoint(config: TrainConfig):
     """Load the latest checkpoint."""
@@ -225,30 +230,38 @@ def load_checkpoint(config: TrainConfig):
         target=None,
         prefix='checkpoint_best_'
     )
+    checkpoint_type = "best"
+    
+    # Fall back to latest checkpoint if best not found
+    if restored is None:
+        restored = checkpoints.restore_checkpoint(
+            ckpt_dir=checkpoint_dir,
+            target=None,
+            prefix='checkpoint_latest_'
+        )
+        checkpoint_type = "latest"
+    
     if restored is not None:
-        print("Restored from best checkpoint")
-        return restored
-        
-    # Fall back to latest checkpoint
-    restored = checkpoints.restore_checkpoint(
-        ckpt_dir=checkpoint_dir,
-        target=None,
-        prefix='checkpoint_latest_'
-    )
-    if restored is not None:
-        print("Restored from latest checkpoint")
-    return restored
+        step = restored.get('step', 0)
+        best_val_loss = restored.get('best_val_loss', float('inf'))
+        print(f"Restored {checkpoint_type} checkpoint from step {step}")
+        return restored['state'], step, best_val_loss
+    
+    return None, 0, float('inf')
 
-def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[int, int]) -> TrainState:
+def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[int, int]) -> Tuple[TrainState, Callable, int]:
     """Initialize the training state."""
     print("\nInitializing training state...")
     
+    start_step = 0
     if config.checkpoint:
         # Try to restore checkpoint
-        restored_state = load_checkpoint(config)
+        restored_state, restored_step, best_val_loss = load_checkpoint(config)
         if restored_state is not None:
             print("Restored from checkpoint")
             params = restored_state['params']
+            start_step = restored_step
+            config = config.replace(best_val_loss=best_val_loss)
         else:
             print("No checkpoint found, initializing from scratch")
             model = GPT2(config.model_config)
@@ -284,7 +297,7 @@ def init_train_state(key, config: TrainConfig, model: GPT2, input_shape: Tuple[i
         apply_fn=model.apply,
         params=params,
         tx=tx
-    ), lr_schedule
+    ), lr_schedule, start_step
 
 def get_batch(key, data, batch_size, block_size):
     """Get a random batch of data."""
@@ -403,7 +416,7 @@ if __name__ == "__main__":
 
     # Initialize training state
     input_shape = (train_config.per_device_batch_size, config.block_size)
-    state, lr_schedule = init_train_state(init_key, train_config, model, input_shape)  # Get lr_schedule
+    state, lr_schedule, start_step = init_train_state(init_key, train_config, model, input_shape)
     num_params = count_params(state.params)
     print(f"Number of parameters: {num_params:,}")
     wandb.run.summary["num_parameters"] = num_params
@@ -417,14 +430,16 @@ if __name__ == "__main__":
 
     # Training loop
     print("\nStarting training...")
-    global_step = 0
+    print(f"Starting from step {start_step}")
+    global_step = start_step
     total_loss = 0
     last_log_time = time.time()  # Initialize timing
     
     # Create replicated step counter for pmap
     step_counter = jnp.zeros((train_config.num_devices,), dtype=jnp.int32)
     
-    for step in range(train_config.train_steps):
+    remaining_steps = train_config.train_steps - start_step
+    for step in range(start_step, train_config.train_steps):
         if step % train_config.log_every == 0:
             print(f"Step {step}/{train_config.train_steps}")
         
