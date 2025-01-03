@@ -15,11 +15,11 @@ This project reimplements Andrej Karpathy's NanoGPT in JAX, focusing on performa
 - 🎯 Cosine learning rate schedule with warmup
 
 ### Training Results
-We reach a validation loss of 3.53 after 300k steps. This took roughly 14 hours on a TPU v3-8, though it hadn't fully converged at that point.
+We reach a validation loss of 3.17 after 270k steps, at which point the model had converged. This took roughly 18 hours on a TPU v3-8.
 
-![Loss Plot](assets/loss_plot_high_quality.svg)
+![Loss Plot](assets/loss.svg)
 
-[![Weights & Biases](https://img.shields.io/badge/WandB-Logs-yellow?logo=wandb)](https://wandb.ai/teateam/nanogpt-jax?nw=5mvml05axlm)
+[![Weights & Biases](https://img.shields.io/badge/WandB-Logs-yellow?logo=wandb)](https://wandb.ai/teateam/nanogpt-jax/runs/sw0gw8vk?nw=dg8746gjz4)
 
 Additionally, when training on a TPU, we hit an average duty cycle of 77%, indicating good accelerator utilization.
 
@@ -87,7 +87,7 @@ nanogpt-jax/
 4. ~~Perform inference from pretrained weights~~
 5. ~~Train the model on TPUs~~
 6. ~~Make it fast with @pmap/@jit~~
-7. Run inference on the trained model
+7. ~~Run inference on the trained model~~
 8. Post-training fun
 9. ~~Implement RoPE, Muon optimizer, and other improvements~~
 
@@ -122,7 +122,12 @@ gcloud alpha compute tpus tpu-vm ssh $VM_NAME --zone=$ZONE
 python train.py
 ```
 
-5. Clean up:
+5. Generate text from best checkpoint:
+```bash
+python inference.py --init_from resume --checkpoint_type best
+```
+
+6. Clean up:
 ```bash
 gcloud alpha compute tpus tpu-vm delete $VM_NAME --zone=$ZONE
 ```
